@@ -8,13 +8,18 @@ namespace Collaborator.ApiClient;
 internal sealed record RunView(
     Guid Id, string ProductId, string Text, string Status, DateTimeOffset CreatedAt,
     int PlanRevision, bool? Approved, string? Decision, string? DecisionComment,
-    string? FailureCode, DraftPlan? Plan);
+    string? FailureCode, string? RepositoryCommit, RepositoryCatalog? RepositoryCatalog, DraftPlan? Plan,
+    CodeChangeStatus? CodeChange);
 
 internal sealed record RunEventView(long Id, Guid RunId, string Kind, string Actor, DateTimeOffset CreatedAt);
 
 internal sealed record PlanRevisionView(
     int Revision, DateTimeOffset CreatedAt, string? Decision, string? Comment,
     string? DecidedBy, DateTimeOffset? DecidedAt, DraftPlan? Plan);
+
+internal sealed record ReviewAssignmentView(
+    Guid RunId, int Revision, string UserId, string DeveloperDisplayName, string? ReviewFocus,
+    string ReviewPrompt, string? Response, string Status, DateTimeOffset AssignedAt, DateTimeOffset? RespondedAt);
 
 internal sealed record SubmissionView(Guid RunId, string Status, string StatusUrl);
 
@@ -47,6 +52,17 @@ internal sealed class CollaboratorApi(HttpClient http, Action<string>? trace)
     public Task<ApiResult<JsonElement>> RegisterProductAsync(ProductRegistration product, CancellationToken ct) =>
         SendAsync<JsonElement>(HttpMethod.Post, "/api/v1/products", product, null, ct);
 
+    public Task<ApiResult<JsonElement>> ConfigureDeveloperAsync(
+        string userId, DeveloperConfiguration developer, CancellationToken ct) =>
+        SendAsync<JsonElement>(HttpMethod.Put,
+            $"/api/v1/developers/{Uri.EscapeDataString(userId)}", developer, null, ct);
+
+    public Task<ApiResult<JsonElement>> UpdateProductRepositoryAsync(
+        string productId, string? repositoryUrl, CancellationToken ct) =>
+        SendAsync<JsonElement>(HttpMethod.Put,
+            $"/api/v1/products/{Uri.EscapeDataString(productId)}/repository",
+            new RepositorySourceUpdate(repositoryUrl), null, ct);
+
     public Task<ApiResult<SubmissionView>> SubmitFeatureAsync(
         string productId, string text, string idempotencyKey, CancellationToken ct) =>
         SendAsync<SubmissionView>(HttpMethod.Post, $"/api/v1/products/{Uri.EscapeDataString(productId)}/feature-requests",
@@ -60,6 +76,14 @@ internal sealed class CollaboratorApi(HttpClient http, Action<string>? trace)
 
     public Task<ApiResult<PlanRevisionView[]>> GetPlansAsync(Guid runId, CancellationToken ct) =>
         SendAsync<PlanRevisionView[]>(HttpMethod.Get, $"/api/v1/runs/{runId}/plans", null, null, ct);
+
+    public Task<ApiResult<ReviewAssignmentView[]>> GetAssignmentsAsync(Guid runId, CancellationToken ct) =>
+        SendAsync<ReviewAssignmentView[]>(HttpMethod.Get, $"/api/v1/runs/{runId}/assignments", null, null, ct);
+
+    public Task<ApiResult<JsonElement>> RespondToAssignmentAsync(
+        Guid runId, string userId, ReviewAssignmentResponse response, CancellationToken ct) =>
+        SendAsync<JsonElement>(HttpMethod.Post,
+            $"/api/v1/runs/{runId}/assignments/{Uri.EscapeDataString(userId)}/response", response, null, ct);
 
     public Task<ApiResult<JsonElement>> DecideAsync(Guid runId, PlanDecision decision, CancellationToken ct) =>
         SendAsync<JsonElement>(HttpMethod.Post, $"/api/v1/runs/{runId}/plan-decisions", decision, null, ct);

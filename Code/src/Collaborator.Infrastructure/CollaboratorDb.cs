@@ -14,6 +14,9 @@ public sealed class CollaboratorDb(DbContextOptions<CollaboratorDb> options) : D
     public DbSet<OutboxMessage> Outbox => Set<OutboxMessage>();
     public DbSet<RunEvent> Events => Set<RunEvent>();
     public DbSet<PlanRevisionRecord> PlanRevisions => Set<PlanRevisionRecord>();
+    public DbSet<DeveloperRecord> Developers => Set<DeveloperRecord>();
+    public DbSet<ReviewAssignmentRecord> ReviewAssignments => Set<ReviewAssignmentRecord>();
+    public DbSet<CodeChangeRecord> CodeChanges => Set<CodeChangeRecord>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -30,6 +33,28 @@ public sealed class CollaboratorDb(DbContextOptions<CollaboratorDb> options) : D
         model.Entity<PlanRevisionRecord>().Property(x => x.Decision).HasMaxLength(16);
         model.Entity<PlanRevisionRecord>().Property(x => x.Comment).HasMaxLength(InputRules.MaximumCommentLength);
         model.Entity<PlanRevisionRecord>().HasOne<FeatureRun>().WithMany().HasForeignKey(x => x.RunId);
+        model.Entity<DeveloperRecord>().HasKey(x => x.UserId);
+        model.Entity<DeveloperRecord>().Property(x => x.UserId).HasMaxLength(128);
+        model.Entity<DeveloperRecord>().Property(x => x.DisplayName).HasMaxLength(200);
+        model.Entity<DeveloperRecord>().Property(x => x.ReviewFocus).HasMaxLength(1_000);
+        model.Entity<ReviewAssignmentRecord>().HasKey(x => new { x.RunId, x.Revision, x.DeveloperId });
+        model.Entity<ReviewAssignmentRecord>().Property(x => x.DeveloperId).HasMaxLength(128);
+        model.Entity<ReviewAssignmentRecord>().Property(x => x.DeveloperDisplayName).HasMaxLength(200);
+        model.Entity<ReviewAssignmentRecord>().Property(x => x.ReviewFocus).HasMaxLength(1_000);
+        model.Entity<ReviewAssignmentRecord>().Property(x => x.ReviewPrompt).IsRequired();
+        model.Entity<ReviewAssignmentRecord>().Property(x => x.Response).HasMaxLength(InputRules.MaximumCommentLength);
+        model.Entity<ReviewAssignmentRecord>().Property<uint>("xmin").IsRowVersion();
+        model.Entity<ReviewAssignmentRecord>().HasOne<PlanRevisionRecord>().WithMany()
+            .HasForeignKey(x => new { x.RunId, x.Revision });
+        model.Entity<ReviewAssignmentRecord>().HasOne<DeveloperRecord>().WithMany()
+            .HasForeignKey(x => x.DeveloperId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<CodeChangeRecord>().HasKey(x => x.RunId);
+        model.Entity<CodeChangeRecord>().Property(x => x.Status).HasMaxLength(32);
+        model.Entity<CodeChangeRecord>().Property(x => x.Summary).HasMaxLength(2_000);
+        model.Entity<CodeChangeRecord>().Property(x => x.BranchName).HasMaxLength(128);
+        model.Entity<CodeChangeRecord>().Property(x => x.BranchCommit).HasMaxLength(64);
+        model.Entity<CodeChangeRecord>().Property<uint>("xmin").IsRowVersion();
+        model.Entity<CodeChangeRecord>().HasOne<FeatureRun>().WithMany().HasForeignKey(x => x.RunId);
         model.Entity<OutboxMessage>().HasIndex(x => new { x.RunId, x.Kind, x.Revision }).IsUnique();
         model.Entity<OutboxMessage>().HasOne<FeatureRun>().WithMany().HasForeignKey(x => x.RunId);
         model.Entity<RunEvent>().HasIndex(x => new { x.RunId, x.Id });

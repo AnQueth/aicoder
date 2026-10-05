@@ -28,7 +28,29 @@ public sealed class RunStore(CollaboratorDb db)
         {
             throw new InvalidOperationException("A new plan revision requires a persisted revise decision.");
         }
-        return (JsonSerializer.Deserialize<DraftPlan>(previous.PlanJson, JsonSerializerOptions.Web), previous.Comment);
+
+        var reviewResponses = await db.ReviewAssignments.AsNoTracking()
+            .Where(x => x.RunId == id && x.Revision == revision - 1 &&
+                x.RespondedAt != null && x.Response != null)
+            .OrderBy(x => x.DeveloperId)
+            .Select(x => new { x.DeveloperId, x.DeveloperDisplayName, x.Response })
+            .ToListAsync(cancellationToken);
+        var feedback = new List<string>();
+        if (!string.IsNullOrWhiteSpace(previous.Comment))
+        {
+            feedback.Add($"Coordinator feedback:\n{previous.Comment.Trim()}");
+        }
+        if (reviewResponses.Count > 0)
+        {
+            feedback.Add(
+                "Developer review feedback:\n" +
+                string.Join("\n\n", reviewResponses.Select(x =>
+                    $"Reviewer {x.DeveloperDisplayName} ({x.DeveloperId}):\n{x.Response}")));
+        }
+
+        return (
+            JsonSerializer.Deserialize<DraftPlan>(previous.PlanJson, JsonSerializerOptions.Web),
+            feedback.Count == 0 ? null : string.Join("\n\n", feedback));
     }
 
     public async Task StorePlanAsync(Guid id, int revision, DraftPlan plan, CancellationToken cancellationToken)
@@ -53,25 +75,73 @@ public sealed class RunStore(CollaboratorDb db)
         run.DecisionBy = null;
         run.Status = "awaiting_approval";
         db.PlanRevisions.Add(new PlanRevisionRecord { RunId = id, Revision = revision, PlanJson = json });
+        var developers = await db.Developers.AsNoTracking()
+            .Where(x => x.IsEnabled).OrderBy(x => x.UserId).ToListAsync(cancellationToken);
+        foreach (var developer in developers)
+        {
+            db.ReviewAssignments.Add(new ReviewAssignmentRecord
+            {
+                RunId = id,
+                Revision = revision,
+                DeveloperId = developer.UserId,
+                DeveloperDisplayName = developer.DisplayName,
+                ReviewFocus = developer.ReviewFocus,
+                ReviewPrompt = BuildReviewPrompt(run, plan, developer)
+            });
+        }
         AddEvent(id, "plan_generated", "planner");
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static string BuildReviewPrompt(FeatureRun run, DraftPlan plan, DeveloperRecord developer)
+    {
+        var focus = string.IsNullOrWhiteSpace(developer.ReviewFocus)
+            ? "implementation feasibility, missing requirements, repository fit, and test coverage"
+            : developer.ReviewFocus.Trim();
+        var steps = string.Join(Environment.NewLine, plan.Steps.Select((step, index) => $"{index + 1}. {step}"));
+        var questions = plan.OpenQuestions.Length == 0
+            ? "(none)"
+            : string.Join(Environment.NewLine, plan.OpenQuestions.Select(question => $"- {question}"));
+        return $"""
+            Review this feature plan as {developer.DisplayName} ({developer.UserId}).
+            Focus your review on: {focus}.
+
+            Feature request:
+            {run.Text}
+
+            Plan summary:
+            {plan.Summary}
+
+            Proposed steps:
+            {steps}
+
+            Open questions:
+            {questions}
+
+            Return concise, actionable feedback identifying risks, omissions, and recommended changes.
+            This response is review evidence for the coordinator; it does not itself approve, reject, or revise the plan.
+            """;
     }
 
     public async Task RecordOutcomeAsync(Guid id, CancellationToken cancellationToken)
     {
         var run = await GetAsync(id, cancellationToken);
-        if (run.Status is "plan_approved" or "plan_rejected")
+        if (run.Status is "code_change_generating" or "code_change_ready" or "plan_rejected")
         {
             return;
         }
 
         run.Status = run.Decision switch
         {
-            PlanDecisionKinds.Approve => "plan_approved",
+            PlanDecisionKinds.Approve => "code_change_generating",
             PlanDecisionKinds.Reject => "plan_rejected",
             _ => throw new InvalidOperationException("A persisted approve or reject decision is required.")
         };
-        AddEvent(id, run.Status, "workflow");
+        AddEvent(id, run.Decision == PlanDecisionKinds.Approve ? "plan_approved" : "plan_rejected", "workflow");
+        if (run.Decision == PlanDecisionKinds.Approve)
+        {
+            AddEvent(id, "code_change_started", "workflow");
+        }
         await db.SaveChangesAsync(cancellationToken);
     }
 
@@ -83,8 +153,14 @@ public sealed class RunStore(CollaboratorDb db)
             return;
         }
         run.Status = "failed";
-        run.FailureCode = "workflow_failed";
-        AddEvent(id, "workflow_failed", "workflow");
+        var codeChangeFailed = run.Decision == PlanDecisionKinds.Approve;
+        run.FailureCode = codeChangeFailed ? "code_change_failed" : "workflow_failed";
+        var codeChange = await db.CodeChanges.SingleOrDefaultAsync(x => x.RunId == id, cancellationToken);
+        if (codeChangeFailed && codeChange is not null)
+        {
+            codeChange.Status = CodeChangeStatuses.Failed;
+        }
+        AddEvent(id, run.FailureCode, "workflow");
         await db.SaveChangesAsync(cancellationToken);
     }
 

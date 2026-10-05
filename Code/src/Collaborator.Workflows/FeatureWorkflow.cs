@@ -14,7 +14,13 @@ using System.Text;
 namespace Collaborator.Workflows;
 
 /// <summary>Durable text-to-draft workflow with a persisted, revision-bound human decision loop.</summary>
-public sealed class FeatureWorkflow(RunStore store, Planner planner, IConfiguration config, ILogger<FeatureWorkflow> logger)
+public sealed class FeatureWorkflow(
+    RunStore store,
+    Planner planner,
+    RepositoryCatalogService repositoryCatalog,
+    CodeChangeService codeChangeService,
+    IConfiguration config,
+    ILogger<FeatureWorkflow> logger)
 {
     [Function(nameof(FeaturePlanWorkflow))]
     public static async Task FeaturePlanWorkflow([OrchestrationTrigger] TaskOrchestrationContext context)
@@ -35,7 +41,18 @@ public sealed class FeatureWorkflow(RunStore store, Planner planner, IConfigurat
                     continue;
                 }
                 await context.CallActivityAsync(nameof(RecordOutcome), id);
-                context.SetCustomStatus("decision_recorded");
+                if (signal.Decision == PlanDecisionKinds.Approve)
+                {
+                    context.SetCustomStatus("code_change_generating");
+                    await context.CallActivityAsync(nameof(GenerateCodeChange), id);
+                    await context.CallActivityAsync(nameof(PrepareReviewBranch), id);
+                    await context.CallActivityAsync(nameof(PublishReviewBranch), id);
+                    context.SetCustomStatus("code_change_ready");
+                }
+                else
+                {
+                    context.SetCustomStatus("decision_recorded");
+                }
                 return;
             }
         }
@@ -73,14 +90,28 @@ public sealed class FeatureWorkflow(RunStore store, Planner planner, IConfigurat
             return;
         }
         logger.LogInformation("Generating draft plan revision {Revision} for run {RunId}.", request.Revision, request.RunId);
+        var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
         var (previousPlan, feedback) = await store.GetRevisionContextAsync(request.RunId, request.Revision, cancellationToken);
-        var plan = await planner.CreateAsync(run.ProductBrief, run.Text, previousPlan, feedback, request.Revision, cancellationToken);
+        var plan = await planner.CreateAsync(
+            run.ProductBrief, run.Text, previousPlan, feedback, request.Revision, catalog, cancellationToken);
         await store.StorePlanAsync(request.RunId, request.Revision, plan, cancellationToken);
     }
 
     [Function(nameof(RecordOutcome))]
     public Task RecordOutcome([ActivityTrigger] Guid id, CancellationToken cancellationToken) =>
         store.RecordOutcomeAsync(id, cancellationToken);
+
+    [Function(nameof(GenerateCodeChange))]
+    public Task GenerateCodeChange([ActivityTrigger] Guid id, CancellationToken cancellationToken) =>
+        codeChangeService.GenerateAsync(id, cancellationToken);
+
+    [Function(nameof(PrepareReviewBranch))]
+    public Task PrepareReviewBranch([ActivityTrigger] Guid id, CancellationToken cancellationToken) =>
+        codeChangeService.PrepareBranchAsync(id, cancellationToken);
+
+    [Function(nameof(PublishReviewBranch))]
+    public Task PublishReviewBranch([ActivityTrigger] Guid id, CancellationToken cancellationToken) =>
+        codeChangeService.PublishBranchAsync(id, cancellationToken);
 
     [Function(nameof(RecordFailure))]
     public Task RecordFailure([ActivityTrigger] Guid id, CancellationToken cancellationToken) =>

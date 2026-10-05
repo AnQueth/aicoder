@@ -10,6 +10,6 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="GitHub.Copilot.SDK" />
     <ProjectReference Include="..\Collaborator.Core\Collaborator.Core.csproj" />
-    <Content Include="Definitions\planner.md" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Definitions\*.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -46,7 +46,7 @@ catch (HttpRequestException ex)
 
 namespace Collaborator.ApiClient
 {
-    /// <summary>Drives one feature request through submit, plan review/revision, and final decision.</summary>
+    /// <summary>Drives one feature request through review and reports its human-review branch.</summary>
     internal sealed class FlowRunner(ClientOptions options)
     {
         private const int TotalPhases = 6;
@@ -54,6 +54,7 @@ namespace Collaborator.ApiClient
 
         private readonly Stopwatch elapsed = Stopwatch.StartNew();
         private readonly List<string> decisions = [];
+        private readonly HashSet<string> reviewResponsesSubmitted = new(StringComparer.Ordinal);
         private CollaboratorApi? api;
         private Guid? runId;
         private long lastEventId;
@@ -86,17 +87,36 @@ namespace Collaborator.ApiClient
             if (options.ExistingRunId is { } existing)
             {
                 Phase(2, "Product registration (skipped: attaching to existing run)");
+                if (!await ConfigureDevelopersAsync(ct))
+                {
+                    return 1;
+                }
                 Phase(3, $"Attach to run {existing}");
                 id = existing;
             }
             else
             {
                 Phase(2, $"Register product '{options.ProductId}'");
+                if (!await ConfigureDevelopersAsync(ct))
+                {
+                    return 1;
+                }
                 var product = await api.RegisterProductAsync(
-                    new ProductRegistration(options.ProductId, options.ProductName, options.ProductBrief), ct);
+                    new ProductRegistration(
+                        options.ProductId, options.ProductName, options.ProductBrief, options.ProductRepositoryUrl), ct);
                 if (product.Status == HttpStatusCode.Conflict)
                 {
                     Info("  already registered (409) - reusing");
+                    if (options.ProductRepositoryUrl is not null)
+                    {
+                        var updated = await api.UpdateProductRepositoryAsync(
+                            options.ProductId, options.ProductRepositoryUrl, ct);
+                        if (!updated.IsSuccess)
+                        {
+                            return Fail($"repository configuration returned {(int)updated.Status}: {updated.Problem}");
+                        }
+                        Info("  repository source configured");
+                    }
                 }
                 else if (!product.IsSuccess)
                 {
@@ -105,6 +125,10 @@ namespace Collaborator.ApiClient
                 else
                 {
                     Info("  created (201)");
+                    if (options.ProductRepositoryUrl is not null)
+                    {
+                        Info("  repository source configured");
+                    }
                 }
 
                 Phase(3, "Submit feature request");
@@ -137,6 +161,10 @@ namespace Collaborator.ApiClient
             {
                 revisionsSeen = Math.Max(revisionsSeen, run.PlanRevision);
                 PrintPlan(run);
+                if (!await ReviewAssignmentsAsync(id, run.PlanRevision, ct))
+                {
+                    return Fail("could not retrieve or submit review assignment responses.");
+                }
                 var decision = options.Interactive ? AskDecision(run) : NextScriptedDecision(run, feedback);
                 var posted = await api.DecideAsync(id, decision, ct);
                 if (!posted.IsSuccess)
@@ -162,14 +190,28 @@ namespace Collaborator.ApiClient
                 }
             }
 
-            Phase(5, "Final status");
+            Phase(5, "Outcome and review branch");
             finalStatus = run.Status;
             Info($"  run {id}: {run.Status}{(run.FailureCode is null ? "" : $" ({run.FailureCode})")}");
+            if (run.CodeChange is { } change)
+            {
+                Info($"  code change: {change.Status}");
+                if (change.BranchName is not null && change.Commit is not null)
+                {
+                    Info($"  review branch: {change.BranchName}");
+                    Info($"  commit: {change.Commit}");
+                    Info($"  changed files: {string.Join(", ", change.ChangedFiles)}");
+                    if (!options.Quiet && change.Summary is not null)
+                    {
+                        Info($"  summary: {change.Summary}");
+                    }
+                }
+            }
 
             Phase(6, "Plan history and events");
             await PrintHistoryAsync(id, ct);
             PrintSummary(run.Status);
-            return run.Status is "plan_approved" or "plan_rejected" ? 0 : 1;
+            return run.Status is "code_change_ready" or "plan_approved" or "plan_rejected" ? 0 : 1;
         }
 
         public void PrintSummary(string outcome)
@@ -304,6 +346,24 @@ namespace Collaborator.ApiClient
                     Console.WriteLine($"    {p.Plan.Summary}");
                 }
             }
+            var assignments = await api.GetAssignmentsAsync(id, ct);
+            if (!assignments.IsSuccess || assignments.Body is null)
+            {
+                Warn($"  assignment history returned {(int)assignments.Status}: {assignments.Problem}");
+            }
+            else
+            {
+                Console.WriteLine($"  review assignments ({assignments.Body.Length}):");
+                foreach (var assignment in assignments.Body)
+                {
+                    Console.WriteLine(
+                        $"    r{assignment.Revision} {assignment.DeveloperDisplayName} ({assignment.UserId}): {assignment.Status}");
+                    if (assignment.Response is not null)
+                    {
+                        Console.WriteLine($"      response: {assignment.Response}");
+                    }
+                }
+            }
             var all = new List<RunEventView>();
             long after = 0;
             while (true)
@@ -320,10 +380,26 @@ namespace Collaborator.ApiClient
             Console.WriteLine($"  events ({all.Count}): {string.Join(" -> ", all.Select(e => e.Kind))}");
         }
 
-        private static void PrintPlan(RunView run)
+        private void PrintPlan(RunView run)
         {
             Console.WriteLine();
             Console.WriteLine($"--- Plan revision {run.PlanRevision} ---");
+            if (run.RepositoryCatalog is { } catalog)
+            {
+                Console.WriteLine($"  Repository catalog: commit {catalog.Commit} ({catalog.FilesAnalyzed} files analyzed)");
+                if (!options.Quiet)
+                {
+                    foreach (var functionality in catalog.Functionalities)
+                    {
+                        Console.WriteLine($"    - {functionality.Name}: {functionality.Description}");
+                        Console.WriteLine($"      Files: {string.Join(", ", functionality.Paths)}");
+                        if (functionality.Symbols.Length > 0)
+                        {
+                            Console.WriteLine($"      Symbols: {string.Join(", ", functionality.Symbols)}");
+                        }
+                    }
+                }
+            }
             if (run.Plan is null)
             {
                 Console.WriteLine("  (no plan body)");
@@ -346,7 +422,87 @@ namespace Collaborator.ApiClient
             Console.WriteLine();
         }
 
-        private static bool IsTerminal(string status) => status is "plan_approved" or "plan_rejected" or "failed" or "blocked";
+        private async Task<bool> ReviewAssignmentsAsync(Guid id, int revision, CancellationToken ct)
+        {
+            var result = await api!.GetAssignmentsAsync(id, ct);
+            if (!result.IsSuccess || result.Body is null)
+            {
+                Warn($"  review assignments returned {(int)result.Status}: {result.Problem}");
+                return false;
+            }
+
+            var assignments = result.Body.Where(x => x.Revision == revision).ToArray();
+            foreach (var assignment in assignments)
+            {
+                Info($"  review assignment for {assignment.DeveloperDisplayName} ({assignment.UserId}): {assignment.Status}");
+                if (!options.Quiet)
+                {
+                    Console.WriteLine($"    Prompt: {assignment.ReviewPrompt}");
+                    if (assignment.Response is not null)
+                    {
+                        Console.WriteLine($"    Response: {assignment.Response}");
+                    }
+                }
+                if (assignment.Status != "pending")
+                {
+                    continue;
+                }
+
+                string? response = null;
+                if (options.Interactive)
+                {
+                    response = Prompt($"    Response from {assignment.DeveloperDisplayName} (Enter to skip)");
+                }
+                else
+                {
+                    if (!reviewResponsesSubmitted.Contains(assignment.UserId))
+                    {
+                        options.ReviewResponses.TryGetValue(assignment.UserId, out response);
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(response))
+                {
+                    continue;
+                }
+
+                var posted = await api.RespondToAssignmentAsync(
+                    id, assignment.UserId, new ReviewAssignmentResponse(response), ct);
+                if (!posted.IsSuccess)
+                {
+                    Warn($"  response for '{assignment.UserId}' returned {(int)posted.Status}: {posted.Problem}");
+                    return false;
+                }
+                reviewResponsesSubmitted.Add(assignment.UserId);
+                Info($"  recorded review response from '{assignment.UserId}'");
+            }
+
+            foreach (var userId in options.ReviewResponses.Keys
+                .Except(reviewResponsesSubmitted, StringComparer.Ordinal)
+                .Except(assignments.Select(x => x.UserId), StringComparer.Ordinal))
+            {
+                Warn($"  no assignment for developer '{userId}' on revision {revision}; response was not submitted");
+            }
+            return true;
+        }
+
+        private async Task<bool> ConfigureDevelopersAsync(CancellationToken ct)
+        {
+            foreach (var developer in options.Developers)
+            {
+                var configured = await api!.ConfigureDeveloperAsync(
+                    developer.UserId, developer.Configuration, ct);
+                if (!configured.IsSuccess)
+                {
+                    Warn($"  developer configuration for '{developer.UserId}' returned {(int)configured.Status}: {configured.Problem}");
+                    return false;
+                }
+                Info($"  configured developer '{developer.UserId}'");
+            }
+            return true;
+        }
+
+        private static bool IsTerminal(string status) =>
+            status is "code_change_ready" or "plan_approved" or "plan_rejected" or "failed" or "blocked";
 
         private static string? Prompt(string label)
         {

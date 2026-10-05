@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Collaborator.Core;
 
 namespace Collaborator.ApiClient;
 
@@ -14,8 +15,11 @@ internal sealed class ClientOptions
     public string ProductName { get; private set; } = "Demo Product";
     public string ProductBrief { get; private set; } =
         "A small web application used to exercise the Collaborator feature-request flow end to end.";
+    public string? ProductRepositoryUrl { get; private set; }
     public string? Feature { get; private set; }
     public Guid? ExistingRunId { get; private set; }
+    public List<DeveloperOption> Developers { get; } = [];
+    public Dictionary<string, string> ReviewResponses { get; } = new(StringComparer.Ordinal);
     public List<string> Feedback { get; } = [];
     public string? FinalDecision { get; private set; }
     public string? RejectReason { get; private set; }
@@ -32,8 +36,9 @@ internal sealed class ClientOptions
         Usage:
           dotnet run --project src/Collaborator.ApiClient -- [options]
 
-        Flow: health -> register product -> submit feature -> wait for plan -> decide
-              (revise with feedback, repeat) -> approve/reject -> plan history + summary.
+        Flow: health -> configure developers -> register product -> submit feature ->
+              review developer assignments -> decide (revise with feedback, repeat) ->
+              approve/reject -> plan and assignment history + summary.
 
         Connection:
           --base-url <url>        API base URL (default http://localhost:5076; env COLLABORATOR_API_URL)
@@ -45,8 +50,13 @@ internal sealed class ClientOptions
           --product <id>          Product id (default demo-product; created if missing)
           --product-name <name>   Product display name when creating
           --brief <text>          Product brief when creating
+          --repository-url <url>  Optional credential-free HTTPS, SSH, or local file Git URL
           --feature <text>        Feature request text (prompted when interactive and omitted)
           --run <guid>            Attach to an existing run instead of submitting a new feature
+
+        Developer reviews:
+          --developer <id|name|focus>  Configure a developer before plan generation (repeatable)
+          --review-response <id=text>  Submit a developer's response (repeatable, scripted)
 
         Decisions (scripted; any of these disables interactive prompts):
           --feedback <text>       Ask the AI to revise the plan with this feedback (repeatable, applied in order)
@@ -63,6 +73,7 @@ internal sealed class ClientOptions
         Examples:
           dotnet run --project src/Collaborator.ApiClient
           dotnet run --project src/Collaborator.ApiClient -- --feature "Add CSV export" --feedback "Include a rollback step" --approve
+          dotnet run --project src/Collaborator.ApiClient -- --developer "alice|Alice|security and privacy" --feature "Add CSV export"
           dotnet run --project src/Collaborator.ApiClient -- --run 3f2b... --reject "Out of scope"
         """;
 
@@ -75,6 +86,11 @@ internal sealed class ClientOptions
         if (!string.IsNullOrWhiteSpace(envUrl))
         {
             options.BaseUrl = ParseUrl(envUrl);
+        }
+        var repositoryUrl = Environment.GetEnvironmentVariable("COLLABORATOR_PRODUCT_REPOSITORY_URL");
+        if (!string.IsNullOrWhiteSpace(repositoryUrl))
+        {
+            options.ProductRepositoryUrl = repositoryUrl;
         }
 
         for (var i = 0; i < args.Length; i++)
@@ -97,7 +113,19 @@ internal sealed class ClientOptions
                 case "--product": options.ProductId = Next(); break;
                 case "--product-name": options.ProductName = Next(); break;
                 case "--brief": options.ProductBrief = Next(); break;
+                case "--repository-url": options.ProductRepositoryUrl = Next(); break;
                 case "--feature": options.Feature = Next(); break;
+                case "--developer": options.Developers.Add(ParseDeveloper(Next())); break;
+                case "--review-response":
+                    var reviewResponse = Next();
+                    var separator = reviewResponse.IndexOf('=');
+                    if (separator <= 0 || separator == reviewResponse.Length - 1 ||
+                        !options.ReviewResponses.TryAdd(reviewResponse[..separator], reviewResponse[(separator + 1)..]))
+                    {
+                        throw new ArgumentException("--review-response requires a unique developer-id=nonempty-response value.");
+                    }
+                    scripted = true;
+                    break;
                 case "--run":
                     options.ExistingRunId = Guid.TryParse(Next(), out var runId)
                         ? runId : throw new ArgumentException("--run requires a GUID.");
@@ -118,6 +146,10 @@ internal sealed class ClientOptions
         if (options.Quiet && options.Verbose)
         {
             throw new ArgumentException("--quiet and --verbose cannot be combined.");
+        }
+        if (options.ProductRepositoryUrl is not null && !InputRules.IsRepositoryUrl(options.ProductRepositoryUrl))
+        {
+            throw new ArgumentException("--repository-url must be a credential-free HTTPS, SSH, or file URL.");
         }
         options.Interactive = forceInteractive || (!scripted && !Console.IsInputRedirected);
         return options;
@@ -199,6 +231,23 @@ internal sealed class ClientOptions
         Uri.TryCreate(value.TrimEnd('/'), UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https"
             ? uri : throw new ArgumentException($"'{value}' is not an absolute http(s) URL.");
 
+    private static DeveloperOption ParseDeveloper(string value)
+    {
+        var parts = value.Split('|', 3);
+        if (parts.Length < 2)
+        {
+            throw new ArgumentException("--developer requires id|display-name|optional-review-focus.");
+        }
+        var developer = new DeveloperConfiguration(parts[1], parts.Length == 3 ? parts[2] : null);
+        if (!InputRules.IsValidDeveloper(parts[0], developer, out var error))
+        {
+            throw new ArgumentException($"Invalid --developer value: {error}");
+        }
+        return new(parts[0].Trim(), developer);
+    }
+
     private static int ParsePositive(string value, string option) =>
         int.TryParse(value, out var n) && n > 0 ? n : throw new ArgumentException($"{option} requires a positive integer.");
 }
+
+internal sealed record DeveloperOption(string UserId, DeveloperConfiguration Configuration);

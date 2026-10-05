@@ -15,6 +15,21 @@
         "cwd": "${workspaceFolder}/Code"
       },
       "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Sample Product: build Taskboard",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/../collaborator-sample-app/Collaborator.SampleWebsite.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/../collaborator-sample-app"
+      },
+      "problemMatcher": "$msCompile"
     }
   ]
 }

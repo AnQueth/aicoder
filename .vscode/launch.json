@@ -20,10 +20,30 @@
       "request": "launch",
       "preLaunchTask": "Collaborator: build API test client",
       "program": "${workspaceFolder}/Code/src/Collaborator.ApiClient/bin/Debug/net10.0/collab-client.dll",
-      "args": ["--interactive"],
+      "args": [
+        "--product", "taskboard-sample",
+        "--product-name", "Taskboard Sample",
+        "--brief", "A small task board web app used as the sample target for Collaborator feature requests.",
+        "--repository-url", "file:///H:/src/collaborator-sample-app-remote.git",
+        "--interactive"
+      ],
       "cwd": "${workspaceFolder}/Code",
       "console": "integratedTerminal",
       "launchSettingsProfile": ""
+    },
+    {
+      "name": "Sample Product: Taskboard (F5)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "Sample Product: build Taskboard",
+      "program": "${workspaceFolder}/../collaborator-sample-app/bin/Debug/net10.0/Collaborator.SampleWebsite.dll",
+      "cwd": "${workspaceFolder}/../collaborator-sample-app",
+      "console": "integratedTerminal",
+      "launchSettingsProfile": "",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "http://localhost:5088"
+      }
     }
   ]
 }

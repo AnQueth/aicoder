@@ -68,7 +68,7 @@ The AppHost launches:
 
 | Resource | Purpose |
 |---|---|
-| PostgreSQL 17 | Product briefs, feature runs, plans, decisions, audit events, outbox |
+| PostgreSQL 17 | Developer configurations, review assignments and responses, product briefs and repository URLs, feature runs, plans, decisions, audit events, outbox |
 | Migration executable | Applies EF migrations before API and workflows start |
 | Azurite | Durable Functions history, control queues, and leases |
 | Key Vault emulator | Serves `Security--ApiKey` / `Security--WorkflowKey` secrets to API and workflows |
@@ -97,7 +97,9 @@ so a Durable Task Scheduler emulator is not required.
 
 ## Explicit model profiles
 
-**Copilot is the default local AppHost mode.** Planning uses `GitHub.Copilot.SDK`
+**Copilot is the configured local AppHost mode** in
+`src\Collaborator.AppHost\appsettings.Development.json`. `Agents:Mode` selects
+which planner runs; it is ordinary configuration, not a secret. Planning uses `GitHub.Copilot.SDK`
 1.0.16, which downloads and verifies its pinned CLI runtime during build. No
 Azure OpenAI endpoint, deployment, or model-provider key is required.
 
@@ -108,21 +110,25 @@ For automation, use a supported token through `COPILOT_GITHUB_TOKEN` in the
 worker environment, never in tracked files or prompt text. See
 [SDK authentication](https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate).
 
-To explicitly select Copilot (including when replacing an old AzureOpenAI or
-Offline user-secret setting), configure the AppHost:
+Sign in to GitHub Copilot CLI as the same OS user running the AppHost. No
+`dotnet user-secrets` command is needed for Copilot settings. To change the
+planner mode, edit `Agents:Mode` in `appsettings.Development.json` or set the
+`Agents__Mode` environment variable. To select a particular Copilot model, use
+the ordinary `Agents:Copilot:Model` configuration key (or
+`Agents__Copilot__Model` environment variable); leaving it unset uses the
+Copilot runtime's default model.
 
-```powershell
-dotnet user-secrets set 'Agents:Mode' 'Copilot' --project src\Collaborator.AppHost
-# Optional: select a model available to your Copilot account.
-dotnet user-secrets set 'Agents:Copilot:Model' 'YOUR-MODEL-ID' --project src\Collaborator.AppHost
-```
+Restart the AppHost after configuration changes. `AzureOpenAI` mode is no
+longer supported.
 
-When no model is configured, the Copilot runtime selects its default. Restart
-the AppHost after configuration changes. `AzureOpenAI` mode is no longer supported.
-
-Each activity creates a fresh tool-free Copilot session; revisions include the
-persisted previous plan and feedback. Configuration discovery and embedding
-retrieval are disabled, and permission requests are denied. Planning has a
+Each activity creates a fresh tool-free Copilot session. Before its first plan,
+the workflow shallow-clones the configured local Git source without checking files
+out, inventories bounded tracked source and documentation, and asks Copilot for a
+reusable functionality catalog containing exact paths and symbols. Catalogs are
+cached per product commit and pinned to each feature run; plan revisions reuse that
+same commit-pinned catalog. A changed commit is indexed before a new run is
+planned. Planning revisions include the prior plan and feedback. Configuration
+discovery and embedding retrieval are disabled; permission requests are denied. Each Copilot call has a
 three-minute deadline, requests an explicit JSON schema, and validates the result
 against the plan contract. Bounds are described in the schema and planner definition
 and enforced by application validation because model providers support only a subset
@@ -134,8 +140,10 @@ there is no automatic live-to-offline fallback. Sessions and runtime processes
 are disposed after each call. The SDK can retain session transcripts locally;
 treat its local storage as sensitive and do not submit credentials.
 
-For deterministic tests without Copilot access, set `Agents:Mode` to `Offline`.
-Offline results explicitly state that no model or repository analysis was performed.
+For deterministic planning tests without Copilot access, set `Agents:Mode` to
+`Offline`. Offline results explicitly state that no model or repository analysis
+was performed; repository catalog generation is Copilot-only and never silently
+falls back to an ungrounded plan.
 
 An opt-in live SDK test generates and revises a synthetic plan (consumes Copilot
 usage and requires authentication). Regular tests skip it:
@@ -149,6 +157,32 @@ Remove-Item Env:\COLLABORATOR_TEST_COPILOT
 The versioned [planner definition](src/Collaborator.Agents/Definitions/planner.md)
 is copied to the worker output. Additional agents/skills are not yet implemented.
 
+## Sample Git-source target
+
+A separate sample product repository is available at
+[`../../collaborator-sample-app`](../../collaborator-sample-app/README.md). It is a small
+Taskboard website. A local bare Git repository at
+`H:\src\collaborator-sample-app-remote.git` is configured as its `origin`; it is a
+simulated remote stored on this machine and is not hosted or published. The
+`Collaborator: API test client (interactive)` F5 configuration registers the
+`taskboard-sample` product with this `file://` URL. Product repository URLs are
+persisted in PostgreSQL and can be set with `--repository-url` or
+`COLLABORATOR_PRODUCT_REPOSITORY_URL`.
+
+Repository inspection currently supports local `file://` Git sources only; HTTPS
+and SSH sources are rejected until authenticated, safe remote fetching is designed.
+Only tracked text files with supported source/documentation extensions are sent for
+analysis. Hidden directories, `.env*`, secret-named files, `appsettings*`, lock
+files, generated/vendor directories, and binary files are excluded. The indexer
+rejects repositories with more than 64 eligible files, files over 12,000 characters, or more than 160,000
+total source characters. It analyzes the repository's default `HEAD` and records
+the exact commit. Source text is sent to the signed-in GitHub Copilot SDK runtime;
+do not use repositories whose contents you are not permitted to send to Copilot.
+The sample is intentionally not part of `Collaborator.slnx` or AppHost, so
+repository tools can operate on it as an independent Git target. From the
+`aicoder` VS Code workspace, use **Sample Product: Taskboard (F5)** to build and
+debug it, or follow that repository's README to run it directly.
+
 ## REST contract
 
 Requests under `/api/v1` and the OpenAPI document require `X-Api-Key`.
@@ -157,10 +191,12 @@ call it directly. `/health` and `/alive` are local readiness/liveness endpoints.
 
 | Method | Route | Input / behavior |
 |---|---|---|
-| POST | `/api/v1/products` | `{ "id": "billing", "name": "Billing", "brief": "Reviewed product context" }`; 201 |
-| GET | `/api/v1/products/{id}` | Product brief; 200 or 404 |
+| POST | `/api/v1/products` | `{ "id": "billing", "name": "Billing", "brief": "Reviewed product context", "repositoryUrl": "file:///H:/src/billing.git" }`; URL optional; 201 |
+| PUT | `/api/v1/products/{id}/repository` | `{ "repositoryUrl": "file:///H:/src/example.git" }`; set or clear the source URL |
+| GET | `/api/v1/products/{id}` | Product brief and optional repository URL; 200 or 404 |
+| GET | `/api/v1/products/{id}/repository-catalog` | Reusable catalog, source commit, and generation time; null catalog until indexed |
 | POST | `/api/v1/products/{id}/feature-requests` | `{ "text": "Add invoice export" }` plus `Idempotency-Key`; 202 with run ID and status URL |
-| GET | `/api/v1/runs/{id}` | Status, draft plan, revision, decision, failure code |
+| GET | `/api/v1/runs/{id}` | Status, draft plan, revision, decision, failure code, and review-branch metadata |
 | GET | `/api/v1/runs/{id}/events?after=0` | Up to 100 audit events after the event cursor |
 | GET | `/api/v1/runs/{id}/plans` | Every plan revision with its decision and feedback |
 | POST | `/api/v1/runs/{id}/plan-decisions` | `{ "revision": 1, "decision": "approve" \| "reject" \| "revise", "comment": "..." }`; 202 |
@@ -168,39 +204,59 @@ call it directly. `/health` and `/alive` are local readiness/liveness endpoints.
 
 The API accepts feature text up to 16,000 characters, product IDs up to 80
 lowercase letters/digits/hyphens, names up to 200 characters, and idempotency keys
-up to 128 characters. The HTTP body limit is 32 KiB.
+up to 128 characters. Planning currently accepts only local `file://` Git
+repositories. Feature submissions without a configured local source return 409.
+Repository inspection or Copilot failures fail the run and never fall back to an
+ungrounded recommendation. Run status includes its pinned catalog and commit, and
+the console client prints the functionality entries and source locations. The
+HTTP body limit is 32 KiB.
 
 Same product/key/text returns the existing run. Reusing the key with different
 text returns 409. Decisions require the generated revision and an approval wait;
 repeated identical decisions are accepted, contradictory decisions return 409.
 `reject` and `revise` require a comment (up to 4,000 characters). `revise` sends
-the feedback, prior plan, and feature text back to the planner, which produces the
-next revision; at most 5 revisions are allowed, after which only approve/reject
-are accepted (409 otherwise).
+the coordinator's comment, all completed developer responses for that plan
+revision, the prior plan, and feature text back to the planner. Pending assignment
+responses are excluded. The planner produces the next revision; at most 5 revisions
+are allowed, after which only approve/reject are accepted (409 otherwise).
 PostgreSQL concurrency tokens prevent racing decisions from overwriting one another.
 
 Workflow progression:
 
 ```text
-queued -> awaiting_approval -> plan_approved | plan_rejected
+queued -> awaiting_approval -> plan_rejected
+                         \-> plan_approved -> code_change_generating
+                                             -> code_change_ready | failed
                ^        |
                |        v (revise + feedback)
                +-- revision_requested
-          activity failure -> failed
+          repository_catalog_generated / repository_catalog_reused
           dispatch exhausted -> blocked
 ```
 
 A transaction persists submission/decision, audit, and outbox intent together.
 The dispatcher uses stable Durable instance IDs, serializes deliveries across
 API hosts, and retries up to ten times with backoff. It owns HTTP retry scheduling
-rather than stacking transient HTTP retries. No implementation or deployment is
-triggered by `plan_approved` in this increment.
+rather than stacking transient HTTP retries. Approval generates a bounded patch
+against the run-pinned repository commit and publishes it to the unique
+`collaborator/feature-{runId}` review branch. Run status reports the branch name,
+commit, changed paths, and patch summary; patch contents are not exposed by the
+API. The branch is prepared through Git's index and object database, so generated
+files are never checked out or executed. The source/default branch is not changed,
+and no merge or deployment is performed automatically. Rejecting a plan does not
+invoke code generation.
 
 ## API client console (`collab-client`)
 
-`src\Collaborator.ApiClient` drives the whole flow end to end: health check,
-product registration, feature submission, plan review (approve / reject / give
-feedback for a new plan), final status, and plan history plus audit events.
+`src\Collaborator.ApiClient` drives the whole flow end to end: developer
+configuration, product registration, feature submission, per-developer review
+assignments and responses, coordinator plan review (approve / reject / give
+feedback for a new plan), final status including generated review-branch details,
+and plan/assignment history plus audit events. Configure each developer before
+plan generation; every enabled developer
+gets a separate prompt for each generated revision. Responses are stored as review
+evidence, included in a later revision when the coordinator requests one, and do
+not replace the coordinator's plan-level decision.
 
 ### Run the client with F5
 
@@ -212,7 +268,8 @@ With the repository root (`aicoder`) open in VS Code:
    `Collaborator: API test client (interactive)` and press F5 to start a second
    debug session.
 3. Enter your feature request in the client's **integrated terminal**. Review
-   each plan and choose approve, reject, or feedback to request a revised plan.
+   each developer assignment, optionally record reviewer responses, then choose
+   approve, reject, or feedback to request a revised plan.
 
 The client F5 configuration builds the client and launches its DLL with the C#
 debugger in the integrated terminal; it does not start Aspire itself or depend
@@ -223,11 +280,12 @@ and key defaults described below. If the API endpoint differs, set
 Do not put API keys in tracked configuration files; use AppHost user secrets.
 
 ```powershell
-# Interactive: review each plan and choose [a]pprove, [r]eject, or [f]eedback
-dotnet run --project src\Collaborator.ApiClient -- --feature "Add invoice export"
+# Interactive: configure a developer, review assignments, then choose [a]pprove, [r]eject, or [f]eedback
+dotnet run --project src\Collaborator.ApiClient -- --developer "alice|Alice|security and privacy" --feature "Add invoice export"
 
 # Scripted: two rounds of feedback, then approve the third plan
 dotnet run --project src\Collaborator.ApiClient -- --feature "Add invoice export" `
+  --developer "alice|Alice|security and privacy" --review-response "alice=Check export authorization and data handling" `
   --feedback "Include CSV and PDF" --feedback "Add a large-export test" --approve
 
 # Non-interactive approve of the first plan; or resume an existing run
@@ -286,11 +344,11 @@ Still to implement, in the order described by the plan:
 
 1. Product configuration import/export, repository definitions, read-token
    references and secure credential resolution.
-2. Repository download/indexing and commit-bound evidence.
-3. Developer/role directory, required contributions, alerts and response tracking.
-4. Discovery, architect, developer, and validation agent definitions and skills.
-5. Entra/product-role authorization, isolated coding workers, reviewed PRs, CI,
+2. Required review contributions, alerts and response tracking.
+3. Discovery, architect, developer, and validation agent definitions and skills.
+4. Entra/product-role authorization, isolated coding workers, reviewed PRs, CI,
    release policy, and cloud deployment.
 
-The current planner uses a product brief only. Even live model mode cannot claim
-repository-grounded planning, test execution, or deployability.
+Developer review assignments and response tracking are available in this increment.
+The current planner uses repository-grounded evidence where a repository is
+configured, but does not execute tests or claim deployability.
