@@ -1,0 +1,22 @@
+<Project Sdk="Aspire.AppHost.Sdk/13.6.0">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AspireUseCliBundle>true</AspireUseCliBundle>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>6f772ef0-127a-4100-b2d6-70cfaacbb414</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.Azure.Functions" />
+    <PackageReference Include="Aspire.Hosting.Azure.KeyVault" />
+    <PackageReference Include="AzureKeyVaultEmulator.Aspire.Hosting" />
+    <PackageReference Include="Aspire.Hosting.Azure.Storage" />
+    <PackageReference Include="Aspire.Hosting.PostgreSQL" />
+    <ProjectReference Include="..\Collaborator.Api\Collaborator.Api.csproj" />
+    <ProjectReference Include="..\Collaborator.Workflows\Collaborator_Workflows.csproj" />
+    <ProjectReference Include="..\Collaborator.Migrator\Collaborator.Migrator.csproj" />
+  </ItemGroup>
+</Project>

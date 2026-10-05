@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="GitHub.Copilot.SDK" />
+    <ProjectReference Include="..\Collaborator.Core\Collaborator.Core.csproj" />
+    <Content Include="Definitions\planner.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

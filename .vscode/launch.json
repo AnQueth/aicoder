@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Collaborator: Aspire extension (debug all services)",
+      "type": "aspire",
+      "request": "launch",
+      "program": "${workspaceFolder}/Code/src/Collaborator.AppHost/Collaborator.AppHost.csproj"
+    },
+    {
+      "name": "Collaborator: Aspire (.NET 10)",
+      "type": "dotnet",
+      "request": "launch",
+      "projectPath": "${workspaceFolder}/Code/src/Collaborator.AppHost/Collaborator.AppHost.csproj",
+      "launchConfigurationId": "TargetFramework=net10.0;https"
+    },
+    {
+      "name": "Collaborator: API test client (interactive)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "Collaborator: build API test client",
+      "program": "${workspaceFolder}/Code/src/Collaborator.ApiClient/bin/Debug/net10.0/collab-client.dll",
+      "args": ["--interactive"],
+      "cwd": "${workspaceFolder}/Code",
+      "console": "integratedTerminal",
+      "launchSettingsProfile": ""
+    }
+  ]
+}

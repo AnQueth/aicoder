@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "Interactive": {
+      "commandName": "Project",
+      "commandLineArgs": "--interactive",
+      "launchBrowser": false
+    }
+  }
+}

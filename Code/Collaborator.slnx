@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Collaborator.Agents/Collaborator.Agents.csproj" />
+    <Project Path="src/Collaborator.Api/Collaborator.Api.csproj" />
+    <Project Path="src/Collaborator.ApiClient/Collaborator.ApiClient.csproj" />
+    <Project Path="src/Collaborator.AppHost/Collaborator.AppHost.csproj" />
+    <Project Path="src/Collaborator.Core/Collaborator.Core.csproj" />
+    <Project Path="src/Collaborator.Infrastructure/Collaborator.Infrastructure.csproj" />
+    <Project Path="src/Collaborator.Migrator/Collaborator.Migrator.csproj" />
+    <Project Path="src/Collaborator.ServiceDefaults/Collaborator.ServiceDefaults.csproj" />
+  </Folder>
+  <Folder Name="/src/Collaborator.Workflows/">
+    <Project Path="src/Collaborator.Workflows/Collaborator_Workflows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Collaborator.Tests/Collaborator.Tests.csproj" />
+  </Folder>
+</Solution>

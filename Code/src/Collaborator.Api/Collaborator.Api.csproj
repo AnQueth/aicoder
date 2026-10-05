@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <UserSecretsId>collaborator-api-local</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <ProjectReference Include="..\Collaborator.Infrastructure\Collaborator.Infrastructure.csproj" />
+    <ProjectReference Include="..\Collaborator.ServiceDefaults\Collaborator.ServiceDefaults.csproj" />
+  </ItemGroup>
+</Project>
