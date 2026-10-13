@@ -2,7 +2,7 @@
 
 **Document status:** Draft for stakeholder review  
 **Version:** 0.2  
-**Date:** 2026-10-03
+**Date:** 2026-10-13
 
 ## 1. Purpose and vision
 
@@ -36,18 +36,21 @@ These additions are design proposals, not previously agreed requirements. The ex
 
 ### 2.2.1 Selected implementation direction
 
-- C# on .NET 10 with Microsoft Agent Framework for specialized agents.
+- C# on .NET 10 with a GitHub Copilot SDK-backed planner, bounded read-only repository tools, and Durable workflow orchestration.
 - Azure Durable Functions owns workflow stages, retries, and persistent human-input waits.
 - All feature intake and user/admin interactions are REST operations; feature text submission starts processing asynchronously. A UI may be added later without owning workflow coordination.
 - PostgreSQL stores authoritative product configuration, developer/role assignments, feature state, approvals, audit, and outbox intents.
 - Product configuration identifies repositories and references scoped read-access credentials; tokens must never appear in committed configuration, prompts, or workflow history.
 - Separate agent definitions and reusable skills support planning, architecture, development, and validation responsibilities.
-- .NET Aspire provides local F5 startup and resource observability with PostgreSQL and Azurite. Local user secrets substitute for a secret vault during development; no official Key Vault emulator is assumed.
-- Azure OpenAI is the selected live model provider; explicit offline model doubles support local workflow verification without hidden fallback.
+- .NET Aspire provides local F5 startup and resource observability with PostgreSQL, Azurite, and a local Key Vault emulator. Local user secrets seed the emulator for development; the current planner mode is `Copilot`.
+- `Agents:Mode=Copilot` is the supported local execution mode in this repository; `AzureOpenAI` mode is not implemented and is intentionally rejected by the app configuration.
 
 The [implementation plan](IMPLEMENTATION_PLAN.md) describes staged delivery.
-The [current foundation](Code/README.md) implements a product-brief-based
-text-to-draft-to-approval slice, not yet repository onboarding or code generation.
+The [current foundation](Code/README.md) implements the BA specification review
+and developer plan-approval flow, bounded repository cataloging, patch generation,
+and review-branch publication for local Git sources. It does not yet support
+hosted repositories, executing generated changes, validation, hosted pull
+requests, merge, or deployment.
 
 ### 2.3 In scope
 

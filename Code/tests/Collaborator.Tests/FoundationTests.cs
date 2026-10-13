@@ -7,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 
@@ -15,6 +16,38 @@ namespace Collaborator.Tests;
 [TestClass]
 public sealed class FoundationTests
 {
+    [TestMethod]
+    public void SkillHistoryAndStageArtifactsHaveRevisionBoundKeys()
+    {
+        using var db = new DesignTimeDbFactory().CreateDbContext([]);
+        var model = db.Model;
+
+        var skillKey = model.FindEntityType(typeof(AgentSkillRecord))?.FindPrimaryKey();
+        Assert.IsNotNull(skillKey);
+        Assert.AreEqual("RoleId,Domain,SkillId",
+            string.Join(",", skillKey.Properties.Select(property => property.Name)));
+
+        var skillRevisionKey = model.FindEntityType(typeof(AgentSkillRevisionRecord))?.FindPrimaryKey();
+        Assert.IsNotNull(skillRevisionKey);
+        Assert.AreEqual("RoleId,Domain,SkillId,Revision",
+            string.Join(",", skillRevisionKey.Properties.Select(property => property.Name)));
+
+        var artifactKey = model.FindEntityType(typeof(WorkflowArtifactRecord))?.FindPrimaryKey();
+        Assert.IsNotNull(artifactKey);
+        Assert.AreEqual("RunId,Stage,ArtifactKey,Revision",
+            string.Join(",", artifactKey.Properties.Select(property => property.Name)));
+        Assert.AreEqual("jsonb",
+            model.FindEntityType(typeof(WorkflowArtifactRecord))!
+                .FindProperty(nameof(WorkflowArtifactRecord.SkillRevisionsJson))!.GetColumnType());
+
+        var questionForeignKey = model.FindEntityType(typeof(StageQuestionRecord))?
+            .GetForeignKeys()
+            .Single(foreignKey => foreignKey.PrincipalEntityType.ClrType == typeof(WorkflowArtifactRecord));
+        Assert.IsNotNull(questionForeignKey);
+        Assert.AreEqual("RunId,Stage,ArtifactKey,Revision",
+            string.Join(",", questionForeignKey.Properties.Select(property => property.Name)));
+    }
+
     [TestMethod]
     [DataRow("")]
     [DataRow(" ")]
@@ -31,8 +64,88 @@ public sealed class FoundationTests
             InputRules.ValidatePlan(new DraftPlan("summary", [], [])));
 
     [TestMethod]
+    public void InvalidPlanReportsTheFieldThatNeedsCorrection()
+    {
+        var error = Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidatePlan(new DraftPlan("summary", [], [])));
+
+        StringAssert.Contains(error.Message, "between 1 and 50 steps");
+    }
+
+    [TestMethod]
+    public void InvalidFeatureSpecificationReportsTheFieldThatNeedsCorrection()
+    {
+        var specification = new FeatureSpecification(
+            "Invoice export",
+            "Users need to export invoices.",
+            [],
+            ["The export can be downloaded."],
+            [],
+            [],
+            []);
+
+        var error = Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidateFeatureSpecification(specification));
+
+        StringAssert.Contains(error.Message, "userStories");
+    }
+
+    [TestMethod]
     public void ProductIdCannotContainPathCharacters() =>
         Assert.IsFalse(InputRules.IsProductId("../secrets"));
+
+    [TestMethod]
+    public void AgentSkillRevisionRequiresLowercaseIdentifiersAndBoundedContent()
+    {
+        var valid = new AgentSkillRevisionRequest(
+            "Requirements analysis", "Ask clear questions before drafting requirements.");
+        Assert.IsTrue(InputRules.IsValidAgentSkillRevision(
+            "business-analyst", "general", "requirements-analysis", valid, out _));
+        Assert.IsFalse(InputRules.IsValidAgentSkillRevision(
+            "Business-analyst", "general", "requirements-analysis", valid, out _));
+        Assert.IsFalse(InputRules.IsValidAgentSkillRevision(
+            "business-analyst", "general", "requirements-analysis",
+            valid with { Prompt = new string('a', InputRules.MaximumAgentSkillPromptLength + 1) }, out _));
+        Assert.IsFalse(InputRules.IsValidAgentSkillRevision(
+            "business-analyst", "general", "requirements-analysis",
+            valid with { ActorId = new string('a', 129) }, out _));
+        Assert.IsFalse(InputRules.IsValidAgentSkillRevision(
+            "business-analyst", "general", "requirements-analysis",
+            valid with { ChangeReason = new string('a', InputRules.MaximumCommentLength + 1) }, out _));
+    }
+
+    [TestMethod]
+    public void ArchitectureAnalysisRejectsEvidenceOutsideThePinnedSnapshot()
+    {
+        var analysis = new ArchitectureAnalysis(
+            "A bounded architecture assessment.",
+            [new ArchitectureComponentImpact(
+                "Invoice service",
+                "The change affects invoice queries.",
+                [new ArchitectureEvidence("src/uninspected.cs", "InvoiceService", 1, 4, "Handles invoice queries.")])],
+            [],
+            [],
+            [],
+            []);
+
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidateArchitectureAnalysis(
+                analysis, new HashSet<string>(["src/invoices.cs"], StringComparer.Ordinal)));
+    }
+
+    [TestMethod]
+    public void ArchitectureDecisionRequiresRevisionAndReasonExceptForApproval()
+    {
+        Assert.IsTrue(InputRules.IsValidArchitectureAnalysisDecision(
+            new ArchitectureAnalysisDecision(1, ArchitectureAnalysisDecisionKinds.Approve), out _));
+        Assert.IsFalse(InputRules.IsValidArchitectureAnalysisDecision(
+            new ArchitectureAnalysisDecision(1, ArchitectureAnalysisDecisionKinds.Revise), out _));
+        Assert.IsTrue(InputRules.IsValidArchitectureAnalysisDecision(
+            new ArchitectureAnalysisDecision(1, ArchitectureAnalysisDecisionKinds.Revise, "Consider the data boundary."),
+            out _));
+        Assert.IsFalse(InputRules.IsValidArchitectureAnalysisDecision(
+            new ArchitectureAnalysisDecision(0, ArchitectureAnalysisDecisionKinds.Approve), out _));
+    }
 
     [TestMethod]
     [DataRow("file:///H:/src/collaborator-sample-app-remote.git", true)]
@@ -75,6 +188,56 @@ public sealed class FoundationTests
             "src/tasks.ts"
         });
     }
+
+    [TestMethod]
+    public void RepositorySourceTools_ListSearchAndReadOnlyPinnedEvidence()
+    {
+        var sourceFiles = new[]
+        {
+            new RepositoryFileEvidence("src/Tasks.cs", "public sealed class TaskService\n{\n    public void Create() { }\n}\n")
+        };
+        var tools = new RepositorySourceTools(sourceFiles);
+
+        var paths = JsonSerializer.Deserialize<string[]>(tools.ListSourceFiles());
+        var matches = JsonSerializer.Deserialize<JsonElement[]>(tools.SearchSourceCode("taskservice", 5));
+
+        CollectionAssert.AreEqual(new[] { "src/Tasks.cs" }, paths);
+        Assert.AreEqual("public sealed class TaskService\n{\n    public void Create() { }\n}\n",
+            tools.ReadSourceFile("src/Tasks.cs"));
+        Assert.AreEqual("src/Tasks.cs", matches![0].GetProperty("path").GetString());
+        Assert.AreEqual(1, matches[0].GetProperty("line").GetInt32());
+        Assert.AreEqual(3, tools.CreateTools().Count);
+        Assert.ThrowsExactly<KeyNotFoundException>(() => tools.ReadSourceFile("../outside.cs"));
+    }
+
+    [TestMethod]
+    public void RepositorySourceTools_PrepareInputBindsToolsAndRemovesRawSourceFromPrompt()
+    {
+        const string marker = "internal-source-marker";
+        var input = JsonSerializer.Serialize(new
+        {
+            requestedFeature = "Add task filtering",
+            sourceFiles = new[] { new RepositoryFileEvidence("src/Tasks.cs", marker) }
+        }, JsonSerializerOptions.Web);
+
+        var context = RepositorySourceTools.PrepareInput(input);
+
+        Assert.IsFalse(context.Prompt.Contains(marker, StringComparison.Ordinal));
+        Assert.AreEqual(3, context.Tools.Count);
+        using var prompt = JsonDocument.Parse(context.Prompt);
+        Assert.AreEqual("Add task filtering", prompt.RootElement.GetProperty("requestedFeature").GetString());
+        Assert.IsFalse(prompt.RootElement.TryGetProperty("sourceFiles", out _));
+    }
+
+    [TestMethod]
+    [DataRow("../outside.cs")]
+    [DataRow("src/appsettings.json")]
+    [DataRow("src/client-secret.cs")]
+    [DataRow("src/.hidden.cs")]
+    [DataRow("src/Tasks.lock")]
+    public void RepositorySourceTools_RejectsUnsafeOrExcludedPaths(string path) =>
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            new RepositorySourceTools([new RepositoryFileEvidence(path, "text")]));
 
     [TestMethod]
     public void CodeChangeRequiresSafeUniquePathsAndMatchingOperations()
@@ -139,6 +302,361 @@ public sealed class FoundationTests
     }
 
     [TestMethod]
+    public async Task OfflineBusinessAnalystRevisionCarriesForwardFeedback()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Agents:Mode"] = "Offline" }).Build();
+        using var services = new ServiceCollection().AddPlanner(config).BuildServiceProvider();
+        var analyst = services.GetRequiredService<BusinessAnalyst>();
+        var first = await analyst.CreateAsync(
+            "Product brief", "Export invoices", "requirements-analysis", "Analyze requirements.",
+            null, null, 1, CancellationToken.None);
+        var revised = await analyst.CreateAsync(
+            "Product brief", "Export invoices", "requirements-analysis", "Analyze requirements.",
+            first, "Clarify CSV export acceptance", 2, CancellationToken.None);
+
+        Assert.IsGreaterThan(0, first.AcceptanceCriteria.Length);
+        StringAssert.Contains(revised.ProblemStatement, "Clarify CSV export acceptance");
+        InputRules.ValidateFeatureSpecification(revised);
+    }
+
+    [TestMethod]
+    public async Task BusinessAnalystMustApproveSpecificationBeforePlanCanBeStored()
+    {
+        var options = new DbContextOptionsBuilder<CollaboratorDb>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new CollaboratorDb(options);
+        var runId = Guid.NewGuid();
+        db.Products.Add(new Product { Id = "sample", Name = "Sample", Brief = "Product brief" });
+        db.Runs.Add(new FeatureRun
+        {
+            Id = runId,
+            ProductId = "sample",
+            Text = "Export invoices",
+            ProductBrief = "Product brief",
+            IdempotencyKey = Guid.NewGuid().ToString("N"),
+            BusinessAnalystId = "analyst",
+            BusinessAnalystSkillId = "requirements-analysis",
+            BusinessAnalystSkillName = "Requirements analysis",
+            BusinessAnalystPrompt = "Analyze requirements.",
+            RepositoryCommit = "commit-1",
+            ReviewerCount = 1,
+            DeveloperSkillsJson = JsonSerializer.Serialize(new[]
+            {
+                new DeveloperSkillSnapshot(
+                    new AgentSkillRevisionReference("developer-ui", "ui-analysis", "general", 2),
+                    "UI analysis", "Analyze user-interface changes."),
+                new DeveloperSkillSnapshot(
+                    new AgentSkillRevisionReference("developer-api", "api-analysis", "general", 1),
+                    "API analysis", "Analyze API and backend changes.")
+            }, JsonSerializerOptions.Web)
+        });
+        db.Developers.Add(new DeveloperRecord
+        {
+            UserId = "architect",
+            DisplayName = "Architect",
+            RolesJson = "[\"architecture\"]"
+        });
+        await db.SaveChangesAsync();
+
+        var store = new RunStore(db);
+        var plan = new DraftPlan("Export invoices", ["Implement export"], []);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.StorePlanAsync(runId, 1, plan, CancellationToken.None));
+
+        var firstSpecification = new FeatureSpecification(
+            "Invoice export", "Users need to export invoices.",
+            ["As a user, I want to export invoices."],
+            ["CSV exports contain the selected invoices."], [], [],
+            ["Which invoices should be included?", "Which file format should be used?"]);
+        await store.StoreFeatureSpecificationAsync(runId, 1, firstSpecification, CancellationToken.None);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.RecordBusinessAnalystDecisionAsync(
+                runId,
+                new BusinessAnalystDecision(1, BusinessAnalystDecisionKinds.Revise, "Clarify the export"),
+                "analyst",
+                CancellationToken.None));
+        await store.RecordBusinessAnalystDecisionAsync(
+            runId,
+            new BusinessAnalystDecision(
+                1,
+                BusinessAnalystDecisionKinds.Revise,
+                "Clarify CSV export acceptance",
+                Answers:
+                [
+                    new("which invoices should be included?", "Only invoices selected by the user."),
+                    new("Which file format should be used?", "CSV.")
+                ]),
+            "analyst",
+            CancellationToken.None);
+
+        var firstSpecificationRevision = await db.FeatureSpecificationRevisions.SingleAsync(
+            x => x.RunId == runId && x.Revision == 1);
+        var answers = JsonSerializer.Deserialize<BusinessAnalystQuestionAnswer[]>(
+            firstSpecificationRevision.AnswersJson!, JsonSerializerOptions.Web);
+        Assert.AreEqual(2, answers?.Length);
+        var revisionContext = await store.GetFeatureSpecificationRevisionContextAsync(
+            runId, 2, CancellationToken.None);
+        Assert.AreEqual(firstSpecification.Title, revisionContext.PreviousSpecification?.Title);
+        StringAssert.Contains(revisionContext.Feedback!, "Clarify CSV export acceptance");
+        StringAssert.Contains(revisionContext.Feedback!, "Only invoices selected by the user.");
+        StringAssert.Contains(revisionContext.Feedback!, "CSV.");
+
+        var revisedSpecification = firstSpecification with
+        {
+            AcceptanceCriteria = ["CSV exports contain the selected invoices and preserve column headers."]
+        };
+        await store.StoreFeatureSpecificationAsync(runId, 2, revisedSpecification, CancellationToken.None);
+        await store.RecordBusinessAnalystDecisionAsync(
+            runId,
+            new BusinessAnalystDecision(2, BusinessAnalystDecisionKinds.Approve),
+            "analyst",
+            CancellationToken.None);
+        var architecture = new ArchitectureAnalysis(
+            "Invoice export adds a repository-backed export path.",
+            [new ArchitectureComponentImpact(
+                "Invoice service",
+                "The feature needs a way to select and export invoices.",
+                [new ArchitectureEvidence("src/invoices.cs", "InvoiceService", 10, 14, "Owns invoice queries.")])],
+            [new ArchitectureOption("Service operation", "Add an operation to the existing invoice service.", [], [])],
+            [],
+            [],
+            []);
+        await store.StoreArchitectureAnalysisAsync(
+            runId,
+            1,
+            architecture,
+            "commit-1",
+            new AgentSkillRevisionReference("architect", "architecture-analysis", "general", 1),
+            new HashSet<string>(["src/invoices.cs"], StringComparer.Ordinal),
+            CancellationToken.None);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.StorePlanAsync(runId, 1, plan, CancellationToken.None,
+                [new DeveloperReviewerMatch("architect", ["architecture"])]));
+        await store.RecordArchitectureAnalysisDecisionAsync(
+            runId,
+            new ArchitectureAnalysisDecision(
+                1, ArchitectureAnalysisDecisionKinds.Revise, "Include the storage boundary."),
+            "analyst",
+            CancellationToken.None);
+        var revisedContext = await store.GetArchitectureRevisionContextAsync(
+            runId, 2, CancellationToken.None);
+        Assert.AreEqual(architecture.Summary, revisedContext.PreviousAnalysis?.Summary);
+        Assert.AreEqual("Include the storage boundary.", revisedContext.Feedback);
+        await store.StoreArchitectureAnalysisAsync(
+            runId,
+            2,
+            architecture with { Summary = "Invoice export adds a repository-backed export path and storage boundary." },
+            "commit-1",
+            new AgentSkillRevisionReference("architect", "architecture-analysis", "general", 1),
+            new HashSet<string>(["src/invoices.cs"], StringComparer.Ordinal),
+            CancellationToken.None);
+        var revisedArtifact = await db.WorkflowArtifacts.SingleAsync(
+            x => x.RunId == runId && x.Stage == WorkflowStages.Architecture && x.Revision == 2);
+        StringAssert.Contains(revisedArtifact.InputArtifactRevisionsJson!, "previousArchitecture");
+        await store.RecordArchitectureAnalysisDecisionAsync(
+            runId,
+            new ArchitectureAnalysisDecision(2, ArchitectureAnalysisDecisionKinds.Approve),
+            "analyst",
+            CancellationToken.None);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.StorePlanAsync(runId, 1, plan, CancellationToken.None,
+                [new DeveloperReviewerMatch("architect", ["architecture"])]));
+        var specialistAnalyses = new[]
+        {
+            new DeveloperSkillAnalysis(
+                "developer-ui", "general", "ui-analysis", "UI analysis", 2,
+                "Use the existing invoice view.", ["Add an export action."], [],
+                ["Verify keyboard access."], []),
+            new DeveloperSkillAnalysis(
+                "developer-api", "general", "api-analysis", "API analysis", 1,
+                "Add a bounded export operation.", ["Add an invoice export endpoint."], [],
+                ["Verify selected invoices."], [])
+        };
+        await store.StoreDeveloperSkillAnalysisAsync(
+            runId, specialistAnalyses[0], "commit-1", CancellationToken.None);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.CompleteDeveloperSkillAnalysesAsync(runId, CancellationToken.None));
+        await store.StoreDeveloperSkillAnalysisAsync(
+            runId, specialistAnalyses[1], "commit-1", CancellationToken.None);
+        await store.StoreDeveloperSkillAnalysisAsync(
+            runId, specialistAnalyses[0], "commit-1", CancellationToken.None);
+        await store.CompleteDeveloperSkillAnalysesAsync(runId, CancellationToken.None);
+        await store.CompleteDeveloperSkillAnalysesAsync(runId, CancellationToken.None);
+        var storedSpecialists = await store.GetDeveloperSkillAnalysesAsync(runId, CancellationToken.None);
+        Assert.AreEqual(2, storedSpecialists?.Length);
+        var specialistArtifact = await db.WorkflowArtifacts.SingleAsync(
+            x => x.RunId == runId && x.Stage == WorkflowStages.SpecialistAnalysis &&
+                x.ArtifactKey == "developer-skills");
+        Assert.AreEqual(2, JsonSerializer.Deserialize<AgentSkillRevisionReference[]>(
+            specialistArtifact.SkillRevisionsJson, JsonSerializerOptions.Web)?.Length);
+        Assert.AreEqual(2, await db.WorkflowArtifacts.CountAsync(
+            x => x.RunId == runId && x.Stage == WorkflowStages.SpecialistAnalysis &&
+                x.ArtifactKey.StartsWith("developer-skill-")));
+        var capturedSkillRevisions = specialistAnalyses.Select(analysis =>
+            new AgentSkillRevisionReference(
+                analysis.RoleId, analysis.SkillId, analysis.Domain, analysis.SkillRevision)).ToArray();
+        var synthesis = new CollaborationSynthesis(
+            "The roles agree on a user-initiated export but differ on where filtering belongs.",
+            [
+                new CollaborationFinding(
+                    "Export starts from the invoice screen.",
+                    [capturedSkillRevisions[0], capturedSkillRevisions[1]])
+            ],
+            [
+                new CollaborationFinding(
+                    "UI proposes client-side filtering while API proposes server-side filtering.",
+                    [capturedSkillRevisions[0], capturedSkillRevisions[1]])
+            ],
+            [
+                new CollaborationQuestion(
+                    "Should export use server-side filtering?",
+                    [capturedSkillRevisions[1]])
+            ]);
+        await store.StoreCollaborationSynthesisAsync(
+            runId, synthesis, "commit-1", CancellationToken.None);
+        await store.StoreCollaborationSynthesisAsync(
+            runId, synthesis, "commit-1", CancellationToken.None);
+        Assert.AreEqual(1, await db.WorkflowArtifacts.CountAsync(
+            x => x.RunId == runId && x.Stage == WorkflowStages.Synthesis &&
+                x.ArtifactKey == "cross-role-synthesis"));
+        var storedSynthesis = await store.GetCollaborationSynthesisAsync(runId, CancellationToken.None);
+        Assert.AreEqual(1, storedSynthesis?.Conflicts.Length);
+        Assert.AreEqual(2, storedSynthesis?.Conflicts[0].Sources.Length);
+        await store.StorePlanAsync(runId, 1, plan, CancellationToken.None,
+            [new DeveloperReviewerMatch("architect", ["architecture"])]);
+
+        var approvedRun = await store.GetAsync(runId, CancellationToken.None);
+        Assert.IsTrue(approvedRun.BusinessAnalystApproved);
+        Assert.AreEqual(1, approvedRun.PlanRevision);
+        Assert.AreEqual("awaiting_approval", approvedRun.Status);
+        var assignment = await db.ReviewAssignments.SingleAsync();
+        Assert.AreEqual("architect", assignment.DeveloperId);
+        CollectionAssert.AreEqual(new[] { "architecture" },
+            JsonSerializer.Deserialize<string[]>(assignment.MatchedRolesJson, JsonSerializerOptions.Web));
+        Assert.IsNotNull(approvedRun.SelectedReviewersJson);
+
+        var developerProfile = await db.Developers.SingleAsync(x => x.UserId == "architect");
+        developerProfile.RolesJson = "[\"backend\"]";
+        await db.SaveChangesAsync();
+        await store.StorePlanAsync(runId, 2, plan, CancellationToken.None,
+            [new DeveloperReviewerMatch("architect", ["architecture"])]);
+
+        var revisionAssignment = await db.ReviewAssignments.SingleAsync(x => x.Revision == 2);
+        CollectionAssert.AreEqual(new[] { "architecture" },
+            JsonSerializer.Deserialize<string[]>(revisionAssignment.MatchedRolesJson, JsonSerializerOptions.Web));
+    }
+
+    [TestMethod]
+    public async Task ImplementationOutcomeRequiresUnanimousReviewOfCurrentPlan()
+    {
+        var options = new DbContextOptionsBuilder<CollaboratorDb>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new CollaboratorDb(options);
+        var runId = Guid.NewGuid();
+        db.Products.Add(new Product { Id = "sample", Name = "Sample", Brief = "Product brief" });
+        db.Runs.Add(new FeatureRun
+        {
+            Id = runId,
+            ProductId = "sample",
+            Text = "Add search",
+            ProductBrief = "Product brief",
+            IdempotencyKey = Guid.NewGuid().ToString("N"),
+            BusinessAnalystId = "analyst",
+            BusinessAnalystSkillId = "requirements-analysis",
+            BusinessAnalystSkillName = "Requirements analysis",
+            BusinessAnalystPrompt = "Analyze requirements.",
+            BusinessAnalystApproved = true,
+            ReviewerCount = 2,
+            PlanRevision = 1,
+            Decision = PlanDecisionKinds.Approve,
+            Status = "awaiting_approval",
+            DeveloperSkillsJson = JsonSerializer.Serialize(new[]
+            {
+                new DeveloperSkillSnapshot(
+                    new AgentSkillRevisionReference("developer-general", "implementation-analysis", "general", 1),
+                    "General developer analysis", "Analyze the change.")
+            }, JsonSerializerOptions.Web)
+        });
+        db.PlanRevisions.Add(new PlanRevisionRecord
+        {
+            RunId = runId,
+            Revision = 1,
+            PlanJson = JsonSerializer.Serialize(new DraftPlan("Search", ["Implement search"], []))
+        });
+        db.WorkflowArtifacts.Add(new WorkflowArtifactRecord
+        {
+            RunId = runId,
+            Stage = WorkflowStages.Architecture,
+            ArtifactKey = "architecture-analysis",
+            Revision = 1,
+            ArtifactType = nameof(ArchitectureAnalysis),
+            PayloadJson = JsonSerializer.Serialize(new ArchitectureAnalysis(
+                "Approved architecture.", [], [], [], [], []), JsonSerializerOptions.Web),
+            RepositoryCommit = "commit-1",
+            Status = WorkflowArtifactStatuses.Approved,
+            Decision = ArchitectureAnalysisDecisionKinds.Approve
+        });
+        db.WorkflowArtifacts.Add(new WorkflowArtifactRecord
+        {
+            RunId = runId,
+            Stage = WorkflowStages.SpecialistAnalysis,
+            ArtifactKey = "developer-skills",
+            Revision = 1,
+            ArtifactType = nameof(DeveloperSkillAnalysis),
+            PayloadJson = JsonSerializer.Serialize(new[]
+            {
+                new DeveloperSkillAnalysis(
+                    "developer-general", "general", "implementation-analysis",
+                    "General developer analysis", 1, "Review the implementation.",
+                    ["Implement search."], [], ["Run unit tests."], [])
+            }, JsonSerializerOptions.Web),
+            SkillRevisionsJson = JsonSerializer.Serialize(new[]
+            {
+                new AgentSkillRevisionReference(
+                    "developer-general", "implementation-analysis", "general", 1)
+            }, JsonSerializerOptions.Web),
+            Status = WorkflowArtifactStatuses.Completed
+        });
+        await db.SaveChangesAsync();
+        var store = new RunStore(db);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.RecordOutcomeAsync(runId, CancellationToken.None));
+
+        db.Developers.AddRange(
+            new DeveloperRecord { UserId = "alice", DisplayName = "Alice" },
+            new DeveloperRecord { UserId = "bob", DisplayName = "Bob" });
+        db.ReviewAssignments.AddRange(
+            new ReviewAssignmentRecord
+            {
+                RunId = runId, Revision = 1, DeveloperId = "alice", DeveloperDisplayName = "Alice",
+                ReviewPrompt = "Review", Decision = DeveloperReviewDecisionKinds.Approve,
+                RespondedAt = DateTimeOffset.UtcNow
+            },
+            new ReviewAssignmentRecord
+            {
+                RunId = runId, Revision = 1, DeveloperId = "bob", DeveloperDisplayName = "Bob",
+                ReviewPrompt = "Review", Decision = DeveloperReviewDecisionKinds.Revise,
+                Response = "Cover empty search results.", RespondedAt = DateTimeOffset.UtcNow
+            });
+        await db.SaveChangesAsync();
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            store.RecordOutcomeAsync(runId, CancellationToken.None));
+        var bobReview = await db.ReviewAssignments.SingleAsync(x => x.DeveloperId == "bob");
+        bobReview.Decision = DeveloperReviewDecisionKinds.Approve;
+        bobReview.Response = null;
+        await db.SaveChangesAsync();
+
+        var run = await store.GetAsync(runId, CancellationToken.None);
+        await store.RecordOutcomeAsync(runId, CancellationToken.None);
+        Assert.AreEqual("code_change_generating", run.Status);
+    }
+
+    [TestMethod]
     [DataRow("approve", null, true)]
     [DataRow("approve", "looks good", true)]
     [DataRow("reject", "out of scope", true)]
@@ -161,22 +679,67 @@ public sealed class FoundationTests
     [TestMethod]
     public void DeveloperConfigurationRequiresIdAndDisplayName()
     {
-        Assert.IsTrue(InputRules.IsValidDeveloper("alice", new DeveloperConfiguration("Alice"), out _));
-        Assert.IsFalse(InputRules.IsValidDeveloper(" ", new DeveloperConfiguration("Alice"), out _));
-        Assert.IsFalse(InputRules.IsValidDeveloper("alice", new DeveloperConfiguration(" "), out _));
+        Assert.IsTrue(InputRules.IsValidDeveloper("alice",
+            new DeveloperConfiguration("Alice", Roles: ["architecture"]), out _));
+        Assert.IsFalse(InputRules.IsValidDeveloper(" ",
+            new DeveloperConfiguration("Alice", Roles: ["architecture"]), out _));
+        Assert.IsFalse(InputRules.IsValidDeveloper("alice",
+            new DeveloperConfiguration(" ", Roles: ["architecture"]), out _));
         Assert.IsFalse(InputRules.IsValidDeveloper("alice", new DeveloperConfiguration(
-            "Alice", new string('x', 1_001)), out _));
+            "Alice", new string('x', 1_001), Roles: ["architecture"]), out _));
+        Assert.IsFalse(InputRules.IsValidDeveloper("alice",
+            new DeveloperConfiguration("Alice"), out _));
     }
 
     [TestMethod]
     public void ReviewAssignmentResponseMustBeNonemptyAndBounded()
     {
         Assert.IsTrue(InputRules.IsValidReviewAssignmentResponse(
-            new ReviewAssignmentResponse("Looks good, add a test."), out _));
-        Assert.IsFalse(InputRules.IsValidReviewAssignmentResponse(new ReviewAssignmentResponse(" "), out _));
+            new ReviewAssignmentResponse(DeveloperReviewDecisionKinds.Approve, "Looks good, add a test."), out _));
+        Assert.IsTrue(InputRules.IsValidReviewAssignmentResponse(
+            new ReviewAssignmentResponse(DeveloperReviewDecisionKinds.Approve), out _));
+        Assert.IsFalse(InputRules.IsValidReviewAssignmentResponse(
+            new ReviewAssignmentResponse("maybe"), out _));
         Assert.IsFalse(InputRules.IsValidReviewAssignmentResponse(new ReviewAssignmentResponse(
-            new string('x', InputRules.MaximumCommentLength + 1)), out _));
+            DeveloperReviewDecisionKinds.Revise), out _));
+        Assert.IsFalse(InputRules.IsValidReviewAssignmentResponse(new ReviewAssignmentResponse(
+            DeveloperReviewDecisionKinds.Approve, new string('x', InputRules.MaximumCommentLength + 1)), out _));
         Assert.IsFalse(InputRules.IsValidReviewAssignmentResponse(null, out _));
+    }
+
+    [TestMethod]
+    public async Task OfflineReviewerSelectorChoosesRequestedDistinctProfilesAndConfiguredRoles()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Agents:Mode"] = "Offline" }).Build();
+        using var services = new ServiceCollection().AddPlanner(config).BuildServiceProvider();
+        var selection = await services.GetRequiredService<DeveloperReviewerSelector>().SelectAsync(
+            "Build an architecture for the database API.",
+            new FeatureSpecification("Data API", "Provide a data API.", ["As a user, I need data."],
+                ["API returns data."], [], [], []),
+            [
+                new DeveloperConfigurationProfile("alice", "Alice", ["architecture"], null),
+                new DeveloperConfigurationProfile("bob", "Bob", ["database"], null),
+                new DeveloperConfigurationProfile("carol", "Carol", ["frontend"], null)
+            ],
+            2,
+            CancellationToken.None);
+
+        Assert.AreEqual(2, selection.Length);
+        Assert.AreEqual(2, selection.Select(x => x.UserId).Distinct(StringComparer.Ordinal).Count());
+        Assert.IsTrue(selection.Any(x => x.UserId == "alice" && x.MatchedRoles.Contains("architecture")));
+        Assert.IsTrue(selection.Any(x => x.UserId == "bob" && x.MatchedRoles.Contains("database")));
+    }
+
+    [TestMethod]
+    public void ReviewerCountIsRequiredToBeWithinSupportedBounds()
+    {
+        Assert.IsTrue(InputRules.IsValidFeatureSubmission(
+            new FeatureSubmission("Add search", ReviewerCount: 3), out _));
+        Assert.IsFalse(InputRules.IsValidFeatureSubmission(
+            new FeatureSubmission("Add search", ReviewerCount: 0), out _));
+        Assert.IsFalse(InputRules.IsValidFeatureSubmission(
+            new FeatureSubmission("Add search", ReviewerCount: InputRules.MaximumReviewerCount + 1), out _));
     }
 
     [TestMethod]
@@ -194,7 +757,11 @@ public sealed class FoundationTests
             ProductId = "sample",
             Text = "Export data",
             ProductBrief = "Sample brief",
-            IdempotencyKey = Guid.NewGuid().ToString("N")
+            IdempotencyKey = Guid.NewGuid().ToString("N"),
+            BusinessAnalystId = "default",
+            BusinessAnalystSkillId = "requirements-analysis",
+            BusinessAnalystSkillName = "Requirements analysis",
+            BusinessAnalystPrompt = "Analyze the request."
         });
         db.Developers.AddRange(
             new DeveloperRecord { UserId = "alice", DisplayName = "Alice" },
@@ -288,14 +855,26 @@ public sealed class FoundationTests
                 Text = "Add feature",
                 ProductBrief = "A sample app.",
                 IdempotencyKey = Guid.NewGuid().ToString("N"),
+                BusinessAnalystId = "default",
+                BusinessAnalystSkillId = "requirements-analysis",
+                BusinessAnalystSkillName = "Requirements analysis",
+                BusinessAnalystPrompt = "Analyze the request.",
+                FeatureSpecificationRevision = 1,
+                BusinessAnalystApproved = true,
                 RepositoryUrl = repositoryUrl,
                 RepositoryCommit = pinnedCommit,
                 RepositoryCatalogJson = JsonSerializer.Serialize(catalog, JsonSerializerOptions.Web),
                 PlanJson = JsonSerializer.Serialize(plan, JsonSerializerOptions.Web),
                 PlanRevision = 1,
                 Decision = PlanDecisionKinds.Approve,
-                Approved = true,
-                Status = "code_change_generating"
+                Status = "code_change_generating",
+                DeveloperSkillsJson = JsonSerializer.Serialize(new[]
+                {
+                    new DeveloperSkillSnapshot(
+                        new AgentSkillRevisionReference(
+                            "developer-general", "implementation-analysis", "general", 1),
+                        "General developer analysis", "Analyze the change.")
+                }, JsonSerializerOptions.Web)
             });
             db.PlanRevisions.Add(new PlanRevisionRecord
             {
@@ -303,6 +882,44 @@ public sealed class FoundationTests
                 Revision = 1,
                 PlanJson = JsonSerializer.Serialize(plan, JsonSerializerOptions.Web),
                 Decision = PlanDecisionKinds.Approve
+            });
+            db.FeatureSpecificationRevisions.Add(new FeatureSpecificationRevisionRecord
+            {
+                RunId = runId,
+                Revision = 1,
+                SpecificationJson = JsonSerializer.Serialize(new FeatureSpecification(
+                    "Feature", "Problem", ["As a user, I want this."], ["It works."], [], [], []),
+                    JsonSerializerOptions.Web),
+                Decision = BusinessAnalystDecisionKinds.Approve
+            });
+            db.WorkflowArtifacts.Add(new WorkflowArtifactRecord
+            {
+                RunId = runId,
+                Stage = WorkflowStages.Architecture,
+                ArtifactKey = "architecture-analysis",
+                Revision = 1,
+                ArtifactType = nameof(ArchitectureAnalysis),
+                PayloadJson = JsonSerializer.Serialize(new ArchitectureAnalysis(
+                    "Approved architecture.", [], [], [], [], []), JsonSerializerOptions.Web),
+                RepositoryCommit = pinnedCommit,
+                Status = WorkflowArtifactStatuses.Approved,
+                Decision = ArchitectureAnalysisDecisionKinds.Approve
+            });
+            db.WorkflowArtifacts.Add(new WorkflowArtifactRecord
+            {
+                RunId = runId,
+                Stage = WorkflowStages.SpecialistAnalysis,
+                ArtifactKey = "developer-skills",
+                Revision = 1,
+                ArtifactType = nameof(DeveloperSkillAnalysis),
+                PayloadJson = JsonSerializer.Serialize(new[]
+                {
+                    new DeveloperSkillAnalysis(
+                        "developer-general", "general", "implementation-analysis",
+                        "General developer analysis", 1, "Review the implementation.",
+                        ["Implement documentation."], [], ["Run tests."], [])
+                }, JsonSerializerOptions.Web),
+                Status = WorkflowArtifactStatuses.Completed
             });
             await db.SaveChangesAsync();
 
@@ -378,9 +995,52 @@ public sealed class FoundationTests
             Text = "Feature",
             ProductBrief = "Sample brief",
             IdempotencyKey = Guid.NewGuid().ToString("N"),
+            BusinessAnalystId = "default",
+            BusinessAnalystSkillId = "requirements-analysis",
+            BusinessAnalystSkillName = "Requirements analysis",
+            BusinessAnalystPrompt = "Analyze the request.",
+            BusinessAnalystApproved = true,
             Decision = PlanDecisionKinds.Reject,
-            Approved = false,
             Status = "plan_rejected"
+        });
+        await db.SaveChangesAsync();
+
+        var generator = new RecordingCodeChangeGenerator(
+            new CodeChangeProposal("Should not be used.", [new("README.md", CodeFileOperations.Add, "x")]));
+        var service = new CodeChangeService(
+            db,
+            generator,
+            new RepositoryCatalogService(db, new UnexpectedCatalogGenerator(),
+                NullLogger<RepositoryCatalogService>.Instance),
+            NullLogger<CodeChangeService>.Instance);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            service.GenerateAsync(runId, CancellationToken.None));
+        Assert.AreEqual(0, generator.Calls);
+    }
+
+    [TestMethod]
+    public async Task CodeChangeCannotStartUntilBusinessAnalystApproves()
+    {
+        var options = new DbContextOptionsBuilder<CollaboratorDb>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new CollaboratorDb(options);
+        var runId = Guid.NewGuid();
+        db.Products.Add(new Product { Id = "sample", Name = "Sample", Brief = "Sample brief" });
+        db.Runs.Add(new FeatureRun
+        {
+            Id = runId,
+            ProductId = "sample",
+            Text = "Feature",
+            ProductBrief = "Sample brief",
+            IdempotencyKey = Guid.NewGuid().ToString("N"),
+            BusinessAnalystId = "default",
+            BusinessAnalystSkillId = "requirements-analysis",
+            BusinessAnalystSkillName = "Requirements analysis",
+            BusinessAnalystPrompt = "Analyze the request.",
+            Decision = PlanDecisionKinds.Approve,
+            Status = "code_change_generating"
         });
         await db.SaveChangesAsync();
 
@@ -453,18 +1113,144 @@ public sealed class FoundationTests
     {
         var generator = new RecordingGenerator(new DraftPlan(
             "Add task filtering", ["Reuse TaskService in src/tasks.ts."], []));
+        var sourceFiles = new[] { new RepositoryFileEvidence("src/tasks.ts", "class TaskService {}") };
         var catalog = new RepositoryCatalog(
             "da420a5846bbca95e4be5b7d9eb7a6f00387536d",
             DateTimeOffset.UnixEpoch,
             1,
             [new RepositoryFunctionality("Task service", "Creates tasks.", ["src/tasks.ts"], ["TaskService"])]);
         await new Planner(generator).CreateAsync(
-            "Brief", "Filter tasks", null, null, 1, catalog, CancellationToken.None);
+            "Brief", "Filter tasks", null, null, null, 1, catalog, sourceFiles, CancellationToken.None);
         using var document = JsonDocument.Parse(generator.Input!);
         var evidence = document.RootElement.GetProperty("repositoryCatalog");
         Assert.AreEqual(catalog.Commit, evidence.GetProperty("commit").GetString());
         Assert.AreEqual("src/tasks.ts",
             evidence.GetProperty("functionalities")[0].GetProperty("paths")[0].GetString());
+        Assert.AreEqual("src/tasks.ts",
+            document.RootElement.GetProperty("sourceFiles")[0].GetProperty("path").GetString());
+    }
+
+    [TestMethod]
+    public async Task PlannerReceivesEveryCapturedDeveloperSkillAnalysis()
+    {
+        var generator = new RecordingGenerator(new DraftPlan("Export invoices", ["Implement export."], []));
+        var analyses = new[]
+        {
+            new DeveloperSkillAnalysis(
+                "developer-ui", "general", "ui-analysis", "UI analysis", 2,
+                "Add an export action.", ["Add a button."], [], ["Check keyboard access."], []),
+            new DeveloperSkillAnalysis(
+                "developer-backend", "general", "api-analysis", "Backend analysis", 1,
+                "Add a bounded endpoint.", ["Add an export endpoint."], [], ["Verify authorization."], [])
+        };
+
+        await new Planner(generator).CreateAsync(
+            "Brief", "Export invoices", null, null, null, 1,
+            null, [], CancellationToken.None, analyses);
+
+        using var input = JsonDocument.Parse(generator.Input!);
+        var serializedAnalyses = input.RootElement.GetProperty("specialistAnalyses");
+        Assert.AreEqual(2, serializedAnalyses.GetArrayLength());
+        Assert.AreEqual("developer-ui", serializedAnalyses[0].GetProperty("roleId").GetString());
+        Assert.AreEqual("developer-backend", serializedAnalyses[1].GetProperty("roleId").GetString());
+    }
+
+    [TestMethod]
+    public async Task PlannerReceivesCollaborationSynthesisAlongsideAllOriginalRoleAnalyses()
+    {
+        var generator = new RecordingGenerator(new DraftPlan("Export invoices", ["Implement export."], []));
+        var skills = new[]
+        {
+            new AgentSkillRevisionReference("developer-ui", "ui-analysis", "general", 2),
+            new AgentSkillRevisionReference("developer-backend", "api-analysis", "general", 1)
+        };
+        var analyses = new[]
+        {
+            new DeveloperSkillAnalysis(
+                skills[0].RoleId, skills[0].Domain, skills[0].SkillId, "UI", skills[0].Revision,
+                "Add an export action.", ["Add a button."], [], [], []),
+            new DeveloperSkillAnalysis(
+                skills[1].RoleId, skills[1].Domain, skills[1].SkillId, "Backend", skills[1].Revision,
+                "Add an endpoint.", ["Add an export endpoint."], [], [], [])
+        };
+        var synthesis = new CollaborationSynthesis(
+            "The roles agree on a user-initiated export but disagree on filtering.",
+            [new CollaborationFinding("Export is user initiated.", skills)],
+            [new CollaborationFinding("Filtering should be client-side or server-side.", skills)],
+            []);
+
+        await new Planner(generator).CreateAsync(
+            "Brief", "Export invoices", null, null, null, 1,
+            null, [], CancellationToken.None, analyses, synthesis);
+
+        using var input = JsonDocument.Parse(generator.Input!);
+        Assert.AreEqual(2, input.RootElement.GetProperty("specialistAnalyses").GetArrayLength());
+        var serializedSynthesis = input.RootElement.GetProperty("collaborationSynthesis");
+        Assert.AreEqual(1, serializedSynthesis.GetProperty("conflicts").GetArrayLength());
+        Assert.AreEqual(2,
+            serializedSynthesis.GetProperty("conflicts")[0].GetProperty("sources").GetArrayLength());
+    }
+
+    [TestMethod]
+    public async Task DeveloperCollaborator_ComparesEveryCapturedSkillAndValidatesSourceRevisions()
+    {
+        var skills = new[]
+        {
+            new AgentSkillRevisionReference("developer-ui", "ui-analysis", "general", 2),
+            new AgentSkillRevisionReference("developer-backend", "api-analysis", "general", 1)
+        };
+        var analyses = new[]
+        {
+            new DeveloperSkillAnalysis(
+                skills[0].RoleId, skills[0].Domain, skills[0].SkillId, "UI", skills[0].Revision,
+                "Add an export action.", ["Add a button."], [], [], []),
+            new DeveloperSkillAnalysis(
+                skills[1].RoleId, skills[1].Domain, skills[1].SkillId, "Backend", skills[1].Revision,
+                "Add an endpoint.", ["Add an export endpoint."], [], [], [])
+        };
+        var generator = new RecordingCollaborationGenerator(new CollaborationSynthesis(
+            "The roles disagree on filtering.",
+            [],
+            [new CollaborationFinding("Use client-side or server-side filtering.", skills)],
+            []));
+
+        var result = await new DeveloperCollaborator(generator).SynthesizeAsync(
+            analyses, skills, CancellationToken.None);
+
+        Assert.AreEqual(1, result.Conflicts.Length);
+        using var input = JsonDocument.Parse(generator.Input!);
+        Assert.AreEqual(2, input.RootElement.GetProperty("specialistAnalyses").GetArrayLength());
+        Assert.AreEqual(2, input.RootElement.GetProperty("capturedSkills").GetArrayLength());
+
+        var invalidGenerator = new RecordingCollaborationGenerator(result with
+        {
+            Conflicts =
+            [
+                new CollaborationFinding("Unattributed conflict.", [
+                    new AgentSkillRevisionReference("developer-unconfigured", "new", "general", 1),
+                    skills[1]
+                ])
+            ]
+        });
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() =>
+            new DeveloperCollaborator(invalidGenerator).SynthesizeAsync(
+                analyses, skills, CancellationToken.None));
+    }
+
+    [TestMethod]
+    public async Task BusinessAnalystReceivesBoundedRepositoryEvidence()
+    {
+        var generator = new RecordingFeatureSpecificationGenerator(new FeatureSpecification(
+            "Title", "Problem", ["As a user, I want this."], ["It works."], [], [], []));
+        var sourceFiles = new[] { new RepositoryFileEvidence("src/Tasks.cs", "class TaskService {}") };
+
+        await new BusinessAnalyst(generator).CreateAsync(
+            "Brief", "Add filtering", "requirements-analysis", "Analyze requirements.",
+            null, null, 1, CancellationToken.None, sourceFiles);
+
+        using var input = JsonDocument.Parse(generator.Input!);
+        Assert.AreEqual("src/Tasks.cs",
+            input.RootElement.GetProperty("sourceFiles")[0].GetProperty("path").GetString());
     }
 
     [TestMethod]
@@ -492,27 +1278,92 @@ public sealed class FoundationTests
 
     [TestMethod]
     [TestCategory("LiveCopilot")]
-    public async Task CopilotProducesAndRevisesValidPlan()
-    {
+    public async Task CopilotUsesRepositoryToolsToGroundAndRevisePlan()
+    {/*
         if (Environment.GetEnvironmentVariable("COLLABORATOR_TEST_COPILOT") != "1")
         {
             Assert.Inconclusive("Set COLLABORATOR_TEST_COPILOT=1 to run this test using Copilot access and usage.");
         }
+        */
+        const string sourceOnlyMethodName = "RenderLegacyInvoiceArchive_7QK4";
+        var sourceFiles = new[]
+        {
+            new RepositoryFileEvidence(
+                "src/InvoiceExportService.cs",
+                """
+                internal sealed class InvoiceExportService
+                {
+                    public byte[] RenderLegacyInvoiceArchive_7QK4(Invoice invoice)
+                    {
+                        return SerializeAsLegacyArchive(invoice);
+                    }
+                }
+                """)
+        };
         var config = new ConfigurationBuilder().AddInMemoryCollection(
             new Dictionary<string, string?> { ["Agents:Mode"] = "Copilot" }).Build();
-        using var services = new ServiceCollection().AddLogging(logging => logging.AddConsole())
+        using var loggerProvider = new CapturingLoggerProvider();
+        using var services = new ServiceCollection()
+            .AddSingleton<IConfiguration>(config)
+            .AddLogging(logging => logging.AddProvider(loggerProvider))
             .AddPlanner(config).BuildServiceProvider();
         var planner = services.GetRequiredService<Planner>();
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(7));
         var first = await planner.CreateAsync(
-            "A fictional invoice application; no repository is supplied.",
-            "Allow exporting invoices.", deadline.Token);
+            "A fictional invoice application.",
+            "Add CSV export for invoices. Before planning, list source files, search for the existing invoice export implementation, and read its matching file. Identify the exact existing export method name and path in a plan step; do not guess.",
+            null, null, null, 1, null, sourceFiles, deadline.Token);
         InputRules.ValidatePlan(first);
+        var firstPlanJson = JsonSerializer.Serialize(first);
+        Assert.Contains(sourceOnlyMethodName, firstPlanJson,
+            "The plan must identify a symbol available only from the repository tool response.");
+        var toolLogs = loggerProvider.Messages
+            .Where(message => message.Contains("Copilot repository source tool invoked:", StringComparison.Ordinal))
+            .ToArray();
+        foreach (var toolName in new[]
+        {
+            "list_repository_source_files",
+            "search_repository_source",
+            "read_repository_source_file"
+        })
+        {
+            Assert.IsTrue(toolLogs.Any(message => message.Contains(toolName, StringComparison.Ordinal)),
+                $"Expected Copilot to invoke repository tool '{toolName}'.");
+        }
+
         var revised = await planner.CreateAsync(
-            "A fictional invoice application; no repository is supplied.",
-            "Allow exporting invoices.", first, "Include CSV export.", 2, deadline.Token);
+            "A fictional invoice application.",
+            "Add CSV export for invoices.", null, first, "Include CSV export.", 2, null, sourceFiles, deadline.Token);
         InputRules.ValidatePlan(revised);
         Assert.Contains("csv", JsonSerializer.Serialize(revised).ToLowerInvariant());
+    }
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> messages = new();
+
+        public string[] Messages => messages.ToArray();
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(messages);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CapturingLogger(ConcurrentQueue<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter) =>
+                messages.Enqueue(formatter(state, exception));
+        }
     }
 
     private sealed class RecordingGenerator(DraftPlan result) : IPlanGenerator
@@ -520,6 +1371,32 @@ public sealed class FoundationTests
         public string? Input { get; private set; }
 
         public Task<DraftPlan> GenerateAsync(string input, CancellationToken cancellationToken)
+        {
+            Input = input;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class RecordingCollaborationGenerator(CollaborationSynthesis result)
+        : IDeveloperCollaborationGenerator
+    {
+        public string? Input { get; private set; }
+
+        public Task<CollaborationSynthesis> SynthesizeDeveloperCollaborationAsync(
+            string input, CancellationToken cancellationToken)
+        {
+            Input = input;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class RecordingFeatureSpecificationGenerator(FeatureSpecification result)
+        : IFeatureSpecificationGenerator
+    {
+        public string? Input { get; private set; }
+
+        public Task<FeatureSpecification> GenerateFeatureSpecificationAsync(
+            string input, CancellationToken cancellationToken)
         {
             Input = input;
             return Task.FromResult(result);

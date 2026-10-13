@@ -1,7 +1,7 @@
 # Collaborator Implementation Plan
 
-**Status:** Approved direction; foundation implementation underway  
-**Date:** 2026-10-04  
+**Status:** Approved direction; revisioned skills, BA clarification/approval, human-reviewed architecture, all-enabled developer-skill processing, cross-role synthesis, developer plan review, and local review-branch workflow implemented
+**Date:** 2026-10-13
 **Source:** [SPECIFICATION.md](./SPECIFICATION.md) and the subsequent requirements discussion.
 
 ## 1. Objective and agreed requirements
@@ -11,7 +11,7 @@ Build a headless application-development platform that accepts a requested featu
 The implementation will use:
 
 - C# targeting .NET 10 (`net10.0`).
-- Microsoft Agent Framework for specialized agents.
+- GitHub Copilot SDK for bounded, structured agent sessions and read-only repository tools.
 - Azure Durable Functions for persistent workflow processing.
 - .NET Aspire for local resource orchestration, service discovery, observability, and one-step F5 startup.
 - PostgreSQL for application/business data, including configuration revisions, artifacts metadata, approvals, and the transactional outbox.
@@ -21,21 +21,32 @@ The implementation will use:
 - Required human contributions and approvals submitted through the API.
 - Traceable, revisioned artifacts from request through validation and release.
 
-The initial operating policy retains the specification's human review requirements. Disabling plan approval must not implicitly disable collaboration or final-output validation.
+The initial operating policy requires human business-analyst approval of the formal
+feature specification, human review of repository-grounded architecture, and
+separate developer approval of the implementation plan. These gates cannot be
+disabled by disabling other optional workflow stages.
 
 ### Implementation checkpoint
 
-The [Code foundation](Code/README.md) now builds on .NET 10 and runs locally with
-Aspire, PostgreSQL, Azurite, Durable Functions, and Microsoft Agent Framework.
-Its implemented slice is product-brief registration, text submission, draft
-generation, revision-bound manual approval/rejection, audit, and outbox delivery.
-Eight unit tests and fourteen live local HTTP checks pass. Full AppHost restart
-recovery of a pending approval has also been verified.
+The [Code foundation](Code/README.md) targets .NET 10 and uses Aspire, PostgreSQL,
+Azurite, Durable Functions, the Copilot SDK, and a Key Vault emulator. It provides editable/versioned role-and-domain skills, submission-time skill
+snapshots, formal feature specification editing/revision/rejection/approval,
+repository-grounded architecture analysis with revision-bound human review,
+submission-time snapshots of every enabled `developer-*` skill, one analysis per
+captured skill, developer review assignments, plan revision/approval, bounded patch
+generation, and publication to a review branch in a local Git repository. The API
+has a shared development key; supplied actor IDs are not authenticated identities
+or role authorization.
 
-This is not yet the repository-grounded milestone: repository configuration and
-read-token resolution, indexing, developer/role assignments, alerts, collaboration,
-coding workers, and releases remain pending. Azure OpenAI live calls and interactive
-F5 debugging remain unverified; the default tested profile is explicitly Offline.
+Current developer-skill increment verification: full solution build succeeded
+with zero warnings/errors, all 65 unit tests passed, and EF reported no pending
+model changes on 2026-10-13. The local HTTP/AppHost smoke test, live Copilot test,
+and interactive F5 debugging have not been run for this increment. Do not treat
+earlier results as verification of current changes.
+
+Hosted repository credentials, identity/role authorization, isolated build/test
+execution, independent validation, hosted pull-request creation, release, and
+deployment automation remain pending.
 
 ## 2. Context map and scope
 
@@ -59,7 +70,12 @@ No source changes, package installations, cloud provisioning, credentials, or de
 - Support both existing-product baselines and a reviewed product brief for products without repositories.
 - Defer a UI, additional source-control providers, unrestricted parallel coding, and automatic autonomy promotion.
 
-## 3. Proposed architecture
+## 3. Target architecture
+
+The diagram below describes the longer-term target. The implemented foundation
+and its boundaries are summarized in the [Code README](Code/README.md) and
+[component diagram](COMPONENT_DIAGRAM.md); components not present there are
+planned work, not existing services.
 
 See the [Mermaid component diagram](./COMPONENT_DIAGRAM.md) for component relationships, local Aspire resources, and execution boundaries.
 
@@ -74,7 +90,7 @@ CLI / HTTP client / future UI
               |
        Stage activities / sub-orchestrations
         /            |                 \
-Repository       Agent Framework    Notifications,
+Repository       Copilot SDK       Notifications,
 analysis         stage agents       human waits,
 workers                              CI integrations
         \            |                 /
@@ -89,17 +105,18 @@ workers                              CI integrations
 
 | Project | Responsibility |
 |---|---|
-| `Collaborator.AppHost` | Aspire startup project coordinating local services, PostgreSQL, storage emulation, and Durable infrastructure. |
-| `Collaborator.ServiceDefaults` | Shared service discovery, health checks, and OpenTelemetry for compatible hosts; verify Functions-host integration separately. |
+| `Collaborator.AppHost` | Aspire startup project coordinating local services, PostgreSQL, storage emulation, Key Vault emulation, and Durable infrastructure. |
+| `Collaborator.ServiceDefaults` | Shared service discovery, health checks, and OpenTelemetry for compatible hosts. |
 | `Collaborator.Core` | Domain records, contracts, stage rules, policy evaluation, and artifact metadata. |
 | `Collaborator.Infrastructure` | Database persistence, outbox, artifact storage, credentials, and external adapters. |
-| `Collaborator.Agents` | Agent Framework integration, definition loading, context assembly, and structured output validation. |
+| `Collaborator.Agents` | Copilot SDK integration, definition loading, repository snapshot tooling, prompt validation, and structured output handling. |
 | `Collaborator.Api` | Authentication, authorization, REST endpoints, OpenAPI, and client-facing errors. |
-| `Collaborator.Workflows` | Durable orchestrations, activities, timers, event handling, and job coordination. |
-| `Collaborator.Runner` | Isolated repository analysis, implementation, build, and test job execution. |
+| `Collaborator.Workflows` | Durable orchestrations, activities, timers, event handling, and workflow coordination. |
+| `Collaborator.Migrator` | One-time EF Core migration runner that prepares PostgreSQL before the API and functions start. |
+| `Collaborator.ApiClient` | Local console/client harness for submitting feature requests and reviewing workflow decisions. |
 | Test projects | Unit, contract, integration, durable recovery, and end-to-end tests. |
 
-These are boundaries within one solution, not a mandate to build independent microservices.
+These project boundaries reflect the current repository snapshot. The foundation currently implements the REST + workflow + approval loop without a dedicated repository-runner job host or production deployment project.
 
 ### Storage and hosting
 
@@ -107,8 +124,8 @@ These are boundaries within one solution, not a mandate to build independent mic
 - Aspire-managed PostgreSQL with a persistent development volume and generated development credentials; do not use an in-memory database as a substitute for PostgreSQL integration tests.
 - Blob storage for large artifacts, evidence, and logs.
 - Azure Key Vault for repository credentials and provider secrets.
-- A supported Durable Functions backend for orchestration history; choose the backend in the compatibility spike.
-- Azurite for local Azure Storage dependencies, plus the Durable Task Scheduler emulator if the chosen backend requires it.
+- Azure Storage provider for local Durable Functions history, backed by Azurite; select and validate the deployed Durable backend before cloud deployment.
+- Azurite for the current local Azure Storage Durable backend; no Durable Task Scheduler emulator is used.
 - Aspire manages all required local infrastructure. Prefer official emulators for Azure services and real local containers for databases; the default development profile must not require provisioned Azure resources.
 - ASP.NET Core API hosting and a separate Functions worker deployment.
 - Dedicated ephemeral execution environments for coding and builds; verify their sandbox boundary before running untrusted repository commands.
@@ -117,43 +134,44 @@ Business records remain authoritative for approvals and artifacts. Durable histo
 
 PostgreSQL is the application database, not an assumed Durable Functions history provider. Aspire coordinates local resources; it does not replace Durable orchestration or provide a security sandbox.
 
-### F5 local development contract
+### Target F5 local development contract
 
 - Set the C# Aspire AppHost as the startup project and provide checked-in Visual Studio/VS Code launch support.
-- After documented one-time prerequisites and secret setup, a single F5 starts PostgreSQL, local storage/Durable infrastructure, the REST API, Functions host, and the runner coordination service.
+- The current AppHost starts PostgreSQL, Azurite, the Key Vault emulator, the migration executable, the REST API, and the Functions host. It does not start a runner coordination service.
 - Use the supported Aspire Azure Functions integration where compatible; verify debugger attachment and required Core Tools rather than assuming ordinary project hosting starts a Functions host correctly.
 - Wire connections and dependency readiness through AppHost references and health checks; run a single migration resource before database-dependent services become ready.
 - Expose API endpoints, resource health, logs, and traces through the Aspire dashboard. The dashboard is development tooling, not a product UI requirement.
 - Persist local database and workflow state across ordinary restarts; document explicit development-only reset procedures.
-- Provide an explicitly selected offline profile with model and notification test doubles so infrastructure/workflow development needs no live model or messaging account. Live mode must fail clearly when credentials are missing, never silently switch to doubles.
-- Keep development credentials in supported user-secret stores. There is no assumed Key Vault emulator; local credential resolution uses an explicitly development-only secret provider, with Key Vault retained for deployed use and live verification.
-- Any third-party Key Vault-compatible emulator requires explicit selection and compatibility/security review before adoption. It must be development-only, and its tests do not establish actual Azure Key Vault compatibility.
-- Runner coordination can start under Aspire, but arbitrary repository builds/coding still require the approved isolated job environment.
+- The current AppHost uses Copilot mode by default and supports an explicitly selected offline test mode. Copilot authentication is separate from the API/workflow keys.
+- Development API/workflow keys live in AppHost user secrets and are passed to a local Key Vault emulator. This emulator setup does not establish compatibility with deployed Azure Key Vault.
+- Generated changes are written to a review branch in the configured local Git remote. The system does not run repository builds/tests, create a hosted pull request, merge, or deploy.
 - Verify the compatible .NET SDK, Aspire tooling, container runtime, Azure Functions Core Tools, and editor/debug extensions as prerequisites.
 
-### Aspire local infrastructure inventory
+### Current Aspire local infrastructure inventory
 
 | Dependency | Local resource | Verification boundary |
 |---|---|---|
 | Application database | Real PostgreSQL container with persistent development volume | Exercises PostgreSQL behavior, EF Core/Npgsql mappings, migrations, and transactions. |
 | Blob/queue/table storage used by the application or Functions | Official Azurite emulator | Exercises the supported local Azure Storage APIs; live-service verification remains separate. |
-| Durable workflow backend | Azurite for the Azure Storage provider, or the Durable Task Scheduler emulator when that backend is selected | Use the backend proven compatible with the Agent Framework integration; do not start an unused scheduler emulator. |
-| Repository/provider secrets | Development-only secret provider backed by user secrets | No official Azure Key Vault emulator is assumed. Keep production Key Vault integration behind the same application credential interface. |
-| Notifications | Local capture adapter exposed through authenticated development API endpoints | Captures actual notification requests without sending messages to people. |
-| Model calls | Explicit offline test double, or a configured live provider | Offline mode verifies workflow behavior, not model quality. Missing live credentials remain an error. |
+| Durable workflow backend | Azure Storage provider backed by Azurite | The Durable Task Scheduler emulator is not used in this configuration. |
+| Development secrets | AppHost user secrets seed the Key Vault emulator | Separate from Copilot CLI authentication; not a production secret-management implementation. |
+| Model calls | GitHub Copilot SDK in normal local mode; explicit offline mode for deterministic development/tests | Copilot calls require user sign-in or a supported token; there is no automatic fallback. |
+| Repository input/output | Local `file://` Git repository | Inspection is pinned to a commit; publishing creates a unique review branch. No hosted source-control provider is configured. |
 
-Start resources through the AppHost, including any emulators needed by the chosen integrations. Azure managed identity, Key Vault authorization, and other cloud-only behavior require separate authorized live tests.
+Start local resources through the AppHost. Azure managed identity, deployed Key
+Vault authorization, hosted repository credentials, and other cloud-only behavior
+require separate authorized live tests.
 
 ## 4. Decisions needed before their implementation phases
 
 | Decision | Proposed approach | Needed before |
 |---|---|---|
-| .NET and package versions | .NET 10 is selected. Pin an exact supported .NET 10 SDK in `global.json`; verify Aspire, Functions isolated worker, Agent Framework, EF Core, and Npgsql compatibility and pin package versions after a spike. Any incompatibility is an explicit blocker, not permission to silently downgrade .NET. | Phase 1 |
-| Agent package release status | Obtain explicit approval if required packages are prerelease. Do not silently install preview dependencies. | Phase 1 |
-| Model provider and deployment | Select an approved provider/model, credentials, and data-use policy; keep model references configurable. | Phase 1 agent spike |
+| .NET and package versions | .NET 10 and SDK 10.0.401 are pinned. The Copilot SDK and current Aspire/Functions/EF Core/Npgsql dependencies are implemented; cloud hosting compatibility remains to be verified before deployment. Any incompatibility is an explicit blocker, not permission to silently downgrade .NET. | Phase 1 |
+| Agent package release status | Check the pinned Copilot SDK release/support status before upgrading; do not silently install preview dependencies. | Phase 1 |
+| Model provider and deployment | GitHub Copilot SDK is the current configured provider. Confirm account policy, model selection, and data-use approval for the pilot; any additional provider requires a separate decision. | Phase 1 agent spike |
 | Source-control provider | GitHub or Azure DevOps first, based on the pilot repositories. | Phase 4 |
 | API identity | Microsoft Entra ID with application roles and authenticated participant identities. | Phase 3 |
-| Persistent storage | PostgreSQL is selected; confirm hosting, artifact store, and the separate Durable backend. | Phases 1-2 |
+| Persistent storage | PostgreSQL is selected for application data; confirm cloud hosting, artifact store, and deployed Durable backend. | Phases 1-2 |
 | Notification delivery | One approved email or messaging adapter, plus API-readable input requests. | Phase 6 |
 | Engineering policy | Eligible pool, collaborator count, deadline, availability, and disagreement escalation. | Phase 6 |
 | Execution environment | Approved isolation, network policy, resource limits, and permitted tools. | Phase 8 |
@@ -356,20 +374,31 @@ Expose stable public run states and blockers without leaking credentials, raw pr
 
 **Implement**
 
+- Editable, versioned business-analyst skill prompts and a submission-time prompt snapshot.
+- Formal, revisioned feature specification with BA editing, feedback, rejection, and approval before planning.
+- Repository-grounded, revisioned architecture analysis after BA approval, with source evidence, provenance, human approve/revise/reject decisions, and enforced approval before plan generation.
+- Every enabled `developer-*` skill is snapshotted at feature submission, processed in its own bounded Durable activity against the approved requirements and architecture, persisted with provenance, and included in plan-generation context after complete-set validation.
+- Cross-role synthesis before planning, with agreements, conflicts, and unresolved questions linked to exact source skill revisions; preserve raw role outputs and surface both for human plan review.
 - Approved implementation-plan template and criterion-to-step/test mapping.
 - Plan approval, rejection, revision requests, and policy-based authorization.
-- Approval binds to the exact plan and relevant context revisions.
+- BA approval binds to the exact specification revision; developer approval binds to the exact plan and relevant context revisions.
+- Code generation is blocked until the BA specification, architecture analysis, complete specialist analysis set, required cross-role synthesis, and developer plan approvals are recorded.
 - Explicit artifact staleness and reevaluation after material upstream changes.
-- Versioned orchestration strategy so deployments do not break in-flight workflows.
+- Use one canonical orchestration; before deploying workflow changes, ensure no
+  active instances depend on an older implementation. This new product does not
+  maintain backward-compatible orchestration or activity versions.
 
 **Verify**
 
-- Execution cannot start with a stale or missing required approval.
-- Disabling plan approval leaves other human duties active.
+- Planning cannot start with a missing or stale BA approval; execution cannot start with a missing or stale plan approval.
+- Cross-role findings cite only captured skill revisions; original role analyses and disagreements remain visible to planners and human reviewers.
+- BA rejection creates no implementation plan; plan rejection creates no code change.
+- The BA and developer approval gates cannot be disabled by workflow configuration.
 - Source drift triggers compatibility review under the configured policy.
 - Pause/resume and cancellation are tested at stage boundaries.
 
-**First usable milestone:** Phases 1-7 produce a complete API-only text-to-approved-plan workflow.
+**First usable milestone:** Phases 1-7 produce a complete API-only
+text-to-BA-approved-specification-to-human-reviewed-architecture-to-all-captured-developer-skills-to-developer-approved-plan workflow.
 
 ### Phase 8: Isolated implementation and pull-request publication
 
@@ -486,7 +515,7 @@ Approve this plan, resolve the Phase 1 decisions, and implement the compatibilit
 
 ## References
 
-- [Microsoft Agent Framework Durable Extension](https://learn.microsoft.com/agent-framework/hosting/azure-functions)
+- [GitHub Copilot SDK authentication](https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate)
 - [Durable Functions .NET isolated worker](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-dotnet-isolated-overview)
 - [Durable Functions orchestrator constraints](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-code-constraints)
 - [Durable Functions external events](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-external-events)

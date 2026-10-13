@@ -1,144 +1,127 @@
 # Collaborator Component Diagram
 
-Proposed architecture for the [implementation plan](./IMPLEMENTATION_PLAN.md).
-Application projects target .NET 10. Solid arrows represent requests or data
-flows; dotted arrows represent configuration, coordination, or telemetry.
+Current foundation architecture for the solution in
+[IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md). This is a .NET 10 REST +
+Durable Functions + Copilot SDK workflow. Solid arrows represent requests or data
+flows; dotted arrows represent configuration, coordination, or observability.
 
 ```mermaid
 flowchart TB
-    CLIENT["HTTP client / integration / future UI"]
-    PEOPLE["Developers, architects, product owners"]
-    CONFIG["Versioned configuration<br/>Products, repositories, people, roles, policies"]
-    SKILLS["Versioned agent definitions and Markdown skills<br/>Analyst, architect, planner, developer, validator"]
+    CLIENT["HTTP client / VS Code console / future UI"]
+    PEOPLE["Product owner, BA, architect reviewer, developers"]
+    CONFIG["Versioned configuration<br/>Products, repositories, roles, skill revisions"]
 
-    subgraph PLATFORM["Collaborator - C# / .NET 10"]
-        API["ASP.NET Core REST API<br/>Feature text, configuration, status,<br/>contributions, approvals, artifacts"]
-        POLICY["Authorization and policy checks<br/>Product access, revisions, stage gates, budgets"]
-        OUTBOX["Transactional outbox dispatcher<br/>Reliable starts, responses, notifications"]
+    subgraph PLATFORM["Collaborator - .NET 10 foundation"]
+        API["ASP.NET Core REST API<br/>feature intake, product and skill config,<br/>status, artifact review, audit"]
+        OUTBOX["Transactional outbox dispatcher<br/>reliable workflow starts and API events"]
+        BRIDGE["Functions HTTP bridge<br/>internal workflow start and decision events"]
 
         subgraph WORKFLOW["Azure Durable Functions - isolated worker"]
-            ORCH["Durable orchestrations<br/>Stages, dependencies, retries,<br/>human waits, deadlines, recovery"]
-            ACTIVITIES["Activities and durable agent integration<br/>External I/O and side-effect coordination"]
+            ORCH["Durable orchestration<br/>stages, retries, waits, revision loops"]
+            ACT["Activities<br/>generate specs, architecture, one bounded<br/>analysis per skill, cross-role synthesis, plans, code"]
         end
 
-        subgraph AGENTS["Microsoft Agent Framework"]
-            ANALYST["Discovery and Analysis agents"]
-            ARCHITECT["Architect agent"]
-            PLANNER["Planner agent"]
-            DEVELOPER["Developer agent"]
-            VALIDATOR["Validator agent<br/>Does not replace human sign-off"]
+        subgraph AGENTS["GitHub Copilot SDK + bounded read-only repo tools"]
+            BA["Business Analyst agent<br/>drafts and revises specs using<br/>human answers to open questions"]
+            ARCH["Architect agent<br/>analyzes approved spec against<br/>pinned repository evidence"]
+            SPECIALIST["Developer skill agents<br/>one analysis for each captured,<br/>enabled developer-* skill"]
+            COLLABORATOR["Cross-role collaborator<br/>source-linked agreements,<br/>conflicts, unresolved questions"]
+            PLAN["Planner agent<br/>drafts and revises implementation plans"]
+            REVIEWER["Reviewer selector<br/>assigns developer approval ownership"]
+            CATALOG["Repository catalog service<br/>indexes repo snapshot for planning"]
+            IMPLEMENTER["Code-change generator<br/>returns a validated patch"]
         end
 
-        KNOWLEDGE["Product knowledge service<br/>Evidence retrieval, source revisions,<br/>baseline review and freshness"]
-        SECRETS["Credential service<br/>Write-only registration,<br/>references, rotation, scoped resolution"]
-        NOTIFY["Notification adapter<br/>Alerts, reminders, escalation"]
-        JOBS["Job coordinator<br/>Dispatch, leases, status, cancellation"]
-        DELIVERY["Source-control / CI / release adapters<br/>Pull requests, checks, deployment policy"]
+        SECRETS["Secret provider access<br/>Key Vault emulator / configuration values"]
+        STORE["Run store + record persistence<br/>skill revisions and run snapshots,<br/>stage artifacts, plans, audit"]
     end
 
     subgraph DATA["Persistent resources"]
-        PG[("PostgreSQL<br/>Business state, configuration, assignments,<br/>approvals, artifact metadata, outbox, audit")]
-        BLOB[("Artifact storage<br/>Baselines, plans, evidence, job logs")]
-        DURABLE[("Durable execution backend<br/>History, checkpoints, timers, events<br/>Separate from application PostgreSQL")]
-        VAULT["Secret provider<br/>Local: development user secrets<br/>Deployed: Azure Key Vault"]
+        PG[("PostgreSQL<br/>application state, runs, approvals, audit, outbox")]
+        AZ[("Azurite<br/>local storage emulator")]
+        KV[("Key Vault emulator<br/>Security--ApiKey / Security--WorkflowKey")]
+        DURABLE[("Durable task backend<br/>history, timers, checkpoints")]
     end
 
-    subgraph EXECUTION["Dedicated isolated execution environments"]
-        READ["Repository analysis jobs<br/>Read credential, clone/fetch,<br/>file inventory and indexing"]
-        CODE["Implementation jobs<br/>Pinned source and plan, scoped tools,<br/>edits, builds, tests, resource limits"]
+    subgraph EXTERNAL["External dependencies"]
+        REPO["Configured local file:// Git repository<br/>source plus review-branch remote"]
+        MODEL["GitHub Copilot CLI / runtime<br/>authenticated by local user or token"]
     end
 
-    subgraph EXTERNAL["External systems"]
-        REPOS["Configured private product repositories"]
-        MODEL["Approved model provider<br/>Or explicitly selected offline test double"]
-        CHANNEL["Email / messaging provider<br/>Or local notification capture"]
-        CICD["Source control and CI/CD"]
-        ENV["Staging / production<br/>Later release milestone"]
+    subgraph DEVHOST["Aspire AppHost"]
+        APPHOST["Aspire AppHost<br/>starts Postgres, Azurite, Key Vault<br/>and the API + Functions host"]
+        MIGRATIONS["EF migration runner"]
+        DASH["Aspire dashboard<br/>health, logs, traces"]
     end
 
-    subgraph DEVHOST["Local development orchestration"]
-        ASPIRE["Aspire AppHost<br/>Single F5 startup, references,<br/>health/readiness and debugger setup"]
-        EMULATORS["Local infrastructure<br/>Real PostgreSQL container<br/>Azurite storage emulator<br/>Durable Task Scheduler emulator if selected"]
-        DASH["Aspire dashboard<br/>Resource health, logs, traces"]
-    end
+    CLIENT -->|"submit feature / answer questions / approve / revise"| API
+    PEOPLE -->|"review BA spec, architecture, and plan"| API
+    CONFIG -.->|"registered product + skill state"| API
 
-    CLIENT -->|"Feature request text and other REST operations"| API
-    PEOPLE -->|"Approaches, clarification, approval decisions via REST"| API
-    CONFIG -.->|"Validated API import"| API
-    SKILLS -.->|"Registered and pinned revisions"| AGENTS
-    API --> POLICY
-    API -->|"Transactions through EF Core / Npgsql"| PG
-    API -->|"Artifact access"| BLOB
-    API -->|"Authorized credential operations"| SECRETS
-    PG -->|"Pending outbox records"| OUTBOX
-    OUTBOX -->|"Start workflow / deliver human-response events"| ORCH
-    OUTBOX -->|"Notification requests"| NOTIFY
+    API -->|"application reads and writes"| STORE
+    ACT -->|"application reads and writes"| STORE
+    STORE -->|"EF Core / Npgsql"| PG
+    PG -->|"pending outbox records"| OUTBOX
+    OUTBOX -->|"internal HTTP start / decision delivery"| BRIDGE
+    ORCH --> ACT
+    BRIDGE --> ORCH
+    ACT -->|"feature spec generation"| BA
+    ACT -->|"architecture analysis after BA approval"| ARCH
+    ACT -->|"one durable activity per skill; persist each result"| SPECIALIST
+    SPECIALIST -->|"all original analyses"| COLLABORATOR
+    ACT -->|"persist source-linked synthesis"| COLLABORATOR
+    ACT -->|"all original analyses + synthesis + approved context"| PLAN
+    ACT -->|"review ownership"| REVIEWER
+    ACT -->|"catalog + snapshot"| CATALOG
+    CATALOG -->|"read-only repository inspection"| REPO
+    ACT -->|"approved spec + plan + pinned source"| IMPLEMENTER
+    BA -->|"structured output"| MODEL
+    ARCH -->|"structured output"| MODEL
+    SPECIALIST -->|"one structured result per skill"| MODEL
+    COLLABORATOR -->|"structured comparison"| MODEL
+    PLAN -->|"structured output"| MODEL
+    IMPLEMENTER -->|"structured patch output"| MODEL
+    ACT -->|"prepare / publish review branch after required reviews"| REPO
 
-    ORCH -->|"Schedule work"| ACTIVITIES
-    ORCH -->|"Persist execution progress"| DURABLE
-    ACTIVITIES -->|"Enforce action gates"| POLICY
-    ACTIVITIES -->|"Persist artifacts and business transitions"| PG
-    ACTIVITIES --> BLOB
-    ACTIVITIES --> ANALYST
-    ACTIVITIES --> ARCHITECT
-    ACTIVITIES --> PLANNER
-    ACTIVITIES --> VALIDATOR
-    ACTIVITIES --> KNOWLEDGE
-    ACTIVITIES --> JOBS
-    ACTIVITIES --> DELIVERY
-    KNOWLEDGE --> PG
-    KNOWLEDGE --> BLOB
-
-    JOBS --> READ
-    JOBS --> CODE
-    READ -->|"Clone / fetch read-only"| REPOS
-    READ -->|"Evidence and baseline artifacts"| BLOB
-    READ -->|"Scoped credential resolution"| SECRETS
-    CODE --> DEVELOPER
-    CODE -->|"Candidate and verification evidence"| BLOB
-    READ -->|"Job results"| JOBS
-    CODE -->|"Job results"| JOBS
-    JOBS -->|"Durable completion event"| ORCH
-    AGENTS -->|"Authorized model calls; no repository tokens"| MODEL
-    SECRETS --> VAULT
-    NOTIFY --> CHANNEL
-    CHANNEL -->|"Alerts only; responses return through REST"| PEOPLE
-    DELIVERY -->|"Separate publication credentials"| SECRETS
-    DELIVERY --> CICD
-    DELIVERY -->|"Verified artifact and explicit release authorization"| ENV
-
-    ASPIRE -.->|"Start and wire"| API
-    ASPIRE -.->|"Start and debug"| WORKFLOW
-    ASPIRE -.->|"Start coordination service"| JOBS
-    ASPIRE -.-> EMULATORS
-    EMULATORS -.->|"Hosts local resources"| PG
-    EMULATORS -.->|"Azurite"| BLOB
-    EMULATORS -.->|"Selected supported local backend"| DURABLE
-    ASPIRE -.-> DASH
-    API -.->|"OpenTelemetry"| DASH
-    ACTIVITIES -.->|"Telemetry through compatible host integration"| DASH
-    JOBS -.->|"Progress and telemetry"| DASH
+    API -.->|"secret resolution"| SECRETS
+    SECRETS --> KV
+    ORCH -->|"durable checkpoints/timers"| DURABLE
+    AZ -.->|"Azure Storage emulator"| DURABLE
+    APPHOST -.->|"start and wire"| API
+    APPHOST -.->|"start and wait for"| WORKFLOW
+    APPHOST -.->|"provisions"| PG
+    APPHOST -.->|"provisions"| AZ
+    APPHOST -.->|"provisions"| KV
+    APPHOST -.->|"complete before db services"| MIGRATIONS
+    APPHOST -.-> DASH
+    API -.->|"telemetry / health"| DASH
+    ORCH -.->|"telemetry / health"| DASH
 ```
 
 ## Architecture boundaries
 
-- All client operations use REST. Notifications do not themselves approve or
-  advance work; authenticated API responses resume durable waits.
-- Orchestrators coordinate deterministic execution. Model calls, repository
-  access, and other external operations use activities, supported durable agent
-  integration, or isolated jobs.
-- PostgreSQL holds application state; Durable Functions uses its own supported
-  execution backend.
-- Aspire starts and observes local resources. It is neither the business
-  workflow engine nor the sandbox for untrusted repository commands.
-- PostgreSQL runs locally as a real database container. Azurite emulates Azure
-  Storage. Start the Durable Task Scheduler emulator only if that backend is
-  selected and verified compatible.
-- No official Key Vault emulator is assumed. Local development uses an explicit
-  development secret provider; deployed environments use Key Vault.
-- Repository tokens are resolved only by authorized credential consumers, never
-  exposed to agent prompts or orchestration history.
-- Agent roles are logical components, not separate microservices. Coding agents
-  operate within the isolated job boundary.
-- Production deployment is a later milestone and requires verified artifacts,
-  environment permissions, approval policy, and tested recovery.
+- The REST API is the system boundary for client requests and human approval responses.
+  Development API-key-protected calls resume Durable waits; actor labels are not verified identities.
+- Workflow ordering is BA specification approval, repository-grounded architecture
+  analysis and human approval, then developer plan review. Architecture evidence is
+  checked against the run's inspected snapshot; the artifact records input revisions,
+  skill revision, and pinned commit.
+- Enabled `developer-*` skills are snapshotted at submission. The workflow processes
+  every captured skill in an independent bounded activity against the same
+  approved context and repository snapshot. Results are persisted individually,
+  checked for complete one-to-one coverage, then compared in a separate synthesis
+  stage. Agreements, conflicts, and unresolved questions link to exact skill
+  revisions. Planning receives both the complete original results and synthesis;
+  human reviewers see them before approving the plan.
+- The Aspire AppHost composes local development dependencies: PostgreSQL, Azurite,
+  the Key Vault emulator, the API, and the Azure Functions host.
+- PostgreSQL is the authoritative application database for runs, approvals, outbox records,
+  and audit state. The Durable task backend tracks workflow execution progress and timers.
+- Copilot agents only receive bounded read-only tools over the run-pinned repository
+  snapshot. A separate workflow activity validates the generated patch and writes
+  the result to a review branch after business-analyst, architecture, and developer
+  approvals.
+- Repository URLs currently support local `file://` Git sources only. Hosted credentials,
+  hosted pull requests, builds/tests, merge, and deployment are not implemented.
+- The Key Vault emulator and user-secret seeding are development-only. Production
+  identity and secret-management behavior have not been validated.

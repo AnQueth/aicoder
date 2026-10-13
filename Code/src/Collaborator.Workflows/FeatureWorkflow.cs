@@ -17,31 +17,94 @@ namespace Collaborator.Workflows;
 public sealed class FeatureWorkflow(
     RunStore store,
     Planner planner,
+    BusinessAnalyst businessAnalyst,
+    Architect architect,
+    DeveloperSpecialist developerSpecialist,
+    DeveloperCollaborator developerCollaborator,
+    DeveloperReviewerSelector reviewerSelector,
     RepositoryCatalogService repositoryCatalog,
     CodeChangeService codeChangeService,
     IConfiguration config,
     ILogger<FeatureWorkflow> logger)
 {
-    [Function(nameof(FeaturePlanWorkflow))]
-    public static async Task FeaturePlanWorkflow([OrchestrationTrigger] TaskOrchestrationContext context)
+    [Function(nameof(BusinessAnalystFeatureWorkflow))]
+    public static async Task BusinessAnalystFeatureWorkflow([OrchestrationTrigger] TaskOrchestrationContext context)
     {
         var id = context.GetInput<Guid>();
         try
         {
-            var revision = 1;
+            var specificationRevision = 1;
             while (true)
             {
-                await context.CallActivityAsync(nameof(GeneratePlan), new PlanGenerationRequest(id, revision));
-                context.SetCustomStatus("awaiting_approval");
-                var signal = await WaitForDecision(context, revision);
-                if (signal.Decision == PlanDecisionKinds.Revise)
+                await context.CallActivityAsync(
+                    nameof(GenerateFeatureSpecification),
+                    new PlanGenerationRequest(id, specificationRevision));
+                context.SetCustomStatus("awaiting_business_analyst_review");
+                var decision = await WaitForBusinessAnalystDecision(context, specificationRevision);
+                if (decision.Decision == BusinessAnalystDecisionKinds.Approve)
                 {
-                    revision++;
+                    break;
+                }
+                if (decision.Decision == BusinessAnalystDecisionKinds.Reject)
+                {
+                    context.SetCustomStatus("feature_request_rejected");
+                    return;
+                }
+                specificationRevision++;
+                context.SetCustomStatus("business_analyst_revision_requested");
+            }
+
+            var architectureRevision = 1;
+            while (true)
+            {
+                await context.CallActivityAsync(
+                    nameof(GenerateArchitectureAnalysis),
+                    new PlanGenerationRequest(id, architectureRevision));
+                context.SetCustomStatus("awaiting_architecture_review");
+                var decision = await WaitForArchitectureDecision(context, architectureRevision);
+                if (decision.Decision == ArchitectureAnalysisDecisionKinds.Approve)
+                {
+                    break;
+                }
+                if (decision.Decision == ArchitectureAnalysisDecisionKinds.Reject)
+                {
+                    context.SetCustomStatus("architecture_rejected");
+                    return;
+                }
+                architectureRevision++;
+                context.SetCustomStatus("architecture_revision_requested");
+            }
+
+            context.SetCustomStatus("developer_skills_processing");
+            var developerSkills = await context.CallActivityAsync<AgentSkillRevisionReference[]>(
+                nameof(GetDeveloperSkillReferences), id);
+            for (var index = 0; index < developerSkills.Length; index++)
+            {
+                await context.CallActivityAsync(
+                    nameof(GenerateDeveloperSkillAnalysis),
+                    new DeveloperSkillAnalysisRequest(
+                        id, developerSkills[index], index + 1, developerSkills.Length));
+            }
+            await context.CallActivityAsync(nameof(CompleteDeveloperSkillAnalyses), id);
+            context.SetCustomStatus("developer_collaboration_synthesis");
+            await context.CallActivityAsync(nameof(GenerateCollaborationSynthesis), id);
+
+            var planRevision = 1;
+            while (true)
+            {
+                await context.CallActivityAsync(
+                    nameof(GenerateCollaborativePlan),
+                    new PlanGenerationRequest(id, planRevision));
+                context.SetCustomStatus("awaiting_approval");
+                var decision = await WaitForDecision(context, planRevision);
+                if (decision.Decision == PlanDecisionKinds.Revise)
+                {
+                    planRevision++;
                     context.SetCustomStatus("revision_requested");
                     continue;
                 }
                 await context.CallActivityAsync(nameof(RecordOutcome), id);
-                if (signal.Decision == PlanDecisionKinds.Approve)
+                if (decision.Decision == PlanDecisionKinds.Approve)
                 {
                     context.SetCustomStatus("code_change_generating");
                     await context.CallActivityAsync(nameof(GenerateCodeChange), id);
@@ -63,6 +126,45 @@ public sealed class FeatureWorkflow(
         }
     }
 
+    private static async Task<BusinessAnalystDecision> WaitForBusinessAnalystDecision(
+        TaskOrchestrationContext context, int revision)
+    {
+        while (true)
+        {
+            var decision = await context.WaitForExternalEvent<BusinessAnalystDecision>("business-analyst-decision");
+            if (decision.Revision != revision || !BusinessAnalystDecisionKinds.IsKnown(decision.Decision))
+            {
+                continue;
+            }
+            if (decision.Decision == BusinessAnalystDecisionKinds.Revise &&
+                revision >= InputRules.MaximumPlanRevisions)
+            {
+                continue;
+            }
+            return decision;
+        }
+    }
+
+    private static async Task<ArchitectureDecisionSignal> WaitForArchitectureDecision(
+        TaskOrchestrationContext context, int revision)
+    {
+        while (true)
+        {
+            var decision = await context.WaitForExternalEvent<ArchitectureDecisionSignal>("architecture-decision");
+            if (decision.Revision != revision ||
+                !ArchitectureAnalysisDecisionKinds.IsKnown(decision.Decision))
+            {
+                continue;
+            }
+            if (decision.Decision == ArchitectureAnalysisDecisionKinds.Revise &&
+                revision >= InputRules.MaximumPlanRevisions)
+            {
+                continue;
+            }
+            return decision;
+        }
+    }
+
     // Stale or duplicate signals (for example outbox redelivery) are ignored unless they bind to the current revision.
     private static async Task<PlanDecisionSignal> WaitForDecision(TaskOrchestrationContext context, int revision)
     {
@@ -81,20 +183,245 @@ public sealed class FeatureWorkflow(
         }
     }
 
-    [Function(nameof(GeneratePlan))]
-    public async Task GeneratePlan([ActivityTrigger] PlanGenerationRequest request, CancellationToken cancellationToken)
+    [Function(nameof(GenerateFeatureSpecification))]
+    public async Task GenerateFeatureSpecification(
+        [ActivityTrigger] PlanGenerationRequest request, CancellationToken cancellationToken)
     {
         var run = await store.GetAsync(request.RunId, cancellationToken);
+        if (run.FeatureSpecificationRevision >= request.Revision)
+        {
+            return;
+        }
+        logger.LogInformation(
+            "Generating business-analysis specification revision {Revision} for run {RunId}.",
+            request.Revision, request.RunId);
+        var (previousSpecification, feedback) =
+            await store.GetFeatureSpecificationRevisionContextAsync(request.RunId, request.Revision, cancellationToken);
+        var repositorySnapshot = await repositoryCatalog.TryReadForRunAsync(request.RunId, cancellationToken);
+        var specification = await businessAnalyst.CreateAsync(
+            run.ProductBrief, run.Text, run.BusinessAnalystSkillName, run.BusinessAnalystPrompt,
+            previousSpecification, feedback, request.Revision, cancellationToken, repositorySnapshot?.Files);
+        await store.StoreFeatureSpecificationAsync(request.RunId, request.Revision, specification, cancellationToken);
+    }
+
+    [Function(nameof(GenerateArchitectureAnalysis))]
+    public async Task GenerateArchitectureAnalysis(
+        [ActivityTrigger] PlanGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var run = await store.GetAsync(request.RunId, cancellationToken);
+        var current = await store.GetCurrentArchitectureArtifactAsync(request.RunId, cancellationToken);
+        if (current is not null && current.Revision >= request.Revision)
+        {
+            return;
+        }
+        if (!run.BusinessAnalystApproved)
+        {
+            throw new InvalidOperationException("Architecture analysis requires an approved business specification.");
+        }
+        var approvedSpecificationRecord = await store.GetFeatureSpecificationRevisionAsync(
+            request.RunId, run.FeatureSpecificationRevision, cancellationToken);
+        if (approvedSpecificationRecord?.Decision != BusinessAnalystDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException("Architecture analysis requires the persisted approved specification.");
+        }
+        var skill = await store.GetActiveAgentSkillAsync(
+            ArchitectureAnalysisSkill.RoleId,
+            ArchitectureAnalysisSkill.Domain,
+            ArchitectureAnalysisSkill.SkillId,
+            cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Configure an enabled architect/general/architecture-analysis skill before architecture review.");
+        var specification = System.Text.Json.JsonSerializer.Deserialize<FeatureSpecification>(
+            approvedSpecificationRecord.SpecificationJson, System.Text.Json.JsonSerializerOptions.Web)
+            ?? throw new InvalidDataException("The approved feature specification is invalid.");
+        var (previousAnalysis, feedback) =
+            await store.GetArchitectureRevisionContextAsync(
+                request.RunId, request.Revision, cancellationToken);
+        var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
+        var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(request.RunId, cancellationToken);
+        var analysis = await architect.AnalyzeAsync(
+            run.ProductBrief,
+            run.Text,
+            specification,
+            skill.Name,
+            skill.Prompt,
+            previousAnalysis,
+            feedback,
+            request.Revision,
+            catalog,
+            repositorySnapshot.Files,
+            cancellationToken);
+        var inspectedPaths = repositorySnapshot.Files.Select(file => file.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        await store.StoreArchitectureAnalysisAsync(
+            request.RunId,
+            request.Revision,
+            analysis,
+            repositorySnapshot.Commit,
+            skill.Reference,
+            inspectedPaths,
+            cancellationToken);
+    }
+
+    [Function(nameof(GetDeveloperSkillReferences))]
+    public async Task<AgentSkillRevisionReference[]> GetDeveloperSkillReferences(
+        [ActivityTrigger] Guid runId, CancellationToken cancellationToken) =>
+        (await store.GetDeveloperSkillSnapshotsAsync(runId, cancellationToken))
+        .Select(snapshot => snapshot.Skill)
+        .ToArray();
+
+    [Function(nameof(GenerateDeveloperSkillAnalysis))]
+    public async Task GenerateDeveloperSkillAnalysis(
+        [ActivityTrigger] DeveloperSkillAnalysisRequest request, CancellationToken cancellationToken)
+    {
+        if (await store.HasDeveloperSkillAnalysisAsync(
+                request.RunId, request.Skill, cancellationToken))
+        {
+            return;
+        }
+        var skill = await store.GetDeveloperSkillSnapshotAsync(
+            request.RunId, request.Skill, cancellationToken);
+        var run = await store.GetAsync(request.RunId, cancellationToken);
+        var architectureArtifact = await store.GetCurrentArchitectureArtifactAsync(
+            request.RunId, cancellationToken);
+        if (architectureArtifact?.Status != WorkflowArtifactStatuses.Approved ||
+            architectureArtifact.Decision != ArchitectureAnalysisDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException(
+                "Developer skill analysis requires human approval of the current architecture analysis.");
+        }
+        var architecture = System.Text.Json.JsonSerializer.Deserialize<ArchitectureAnalysis>(
+            architectureArtifact.PayloadJson, System.Text.Json.JsonSerializerOptions.Web)
+            ?? throw new InvalidDataException("The approved architecture analysis is invalid.");
+        var specificationRecord = await store.GetFeatureSpecificationRevisionAsync(
+            request.RunId, run.FeatureSpecificationRevision, cancellationToken);
+        if (specificationRecord?.Decision != BusinessAnalystDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException("Developer skill analysis requires the persisted approved specification.");
+        }
+        var specification = System.Text.Json.JsonSerializer.Deserialize<FeatureSpecification>(
+            specificationRecord.SpecificationJson, System.Text.Json.JsonSerializerOptions.Web)
+            ?? throw new InvalidDataException("The approved feature specification is invalid.");
+        var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
+        var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(request.RunId, cancellationToken);
+        logger.LogInformation(
+            "Processing developer skill {SkillIndex}/{SkillCount}: {RoleId}/{Domain}/{SkillId} revision {Revision} for run {RunId}.",
+            request.SkillIndex, request.SkillCount, skill.Skill.RoleId, skill.Skill.Domain,
+            skill.Skill.SkillId, skill.Skill.Revision, request.RunId);
+        var analysis = await developerSpecialist.AnalyzeAsync(
+            skill,
+            run.ProductBrief,
+            run.Text,
+            specification,
+            architecture,
+            catalog,
+            repositorySnapshot.Files,
+            cancellationToken);
+        await store.StoreDeveloperSkillAnalysisAsync(
+            request.RunId, analysis, repositorySnapshot.Commit, cancellationToken);
+    }
+
+    [Function(nameof(CompleteDeveloperSkillAnalyses))]
+    public Task CompleteDeveloperSkillAnalyses(
+        [ActivityTrigger] Guid runId, CancellationToken cancellationToken) =>
+        store.CompleteDeveloperSkillAnalysesAsync(runId, cancellationToken);
+
+    [Function(nameof(GenerateCollaborationSynthesis))]
+    public async Task GenerateCollaborationSynthesis(
+        [ActivityTrigger] Guid runId, CancellationToken cancellationToken)
+    {
+        if (await store.GetCollaborationSynthesisAsync(runId, cancellationToken) is not null)
+        {
+            return;
+        }
+        var run = await store.GetAsync(runId, cancellationToken);
+        var architecture = await store.GetCurrentArchitectureArtifactAsync(runId, cancellationToken);
+        if (!run.BusinessAnalystApproved ||
+            architecture?.Status != WorkflowArtifactStatuses.Approved ||
+            architecture.Decision != ArchitectureAnalysisDecisionKinds.Approve ||
+            run.RepositoryCommit is null ||
+            architecture.RepositoryCommit != run.RepositoryCommit)
+        {
+            throw new InvalidOperationException(
+                "Cross-role synthesis requires approved inputs from the repository commit pinned to this run.");
+        }
+        var specification = await store.GetFeatureSpecificationRevisionAsync(
+            runId, run.FeatureSpecificationRevision, cancellationToken);
+        if (specification?.Decision != BusinessAnalystDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException(
+                "Cross-role synthesis requires the persisted approved feature specification.");
+        }
+        var analyses = await store.GetDeveloperSkillAnalysesAsync(runId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Cross-role synthesis requires completed analyses from every captured developer skill.");
+        var snapshots = await store.GetDeveloperSkillSnapshotsAsync(runId, cancellationToken);
+        var synthesis = await developerCollaborator.SynthesizeAsync(
+            analyses, snapshots.Select(snapshot => snapshot.Skill).ToArray(), cancellationToken);
+        await store.StoreCollaborationSynthesisAsync(
+            runId,
+            synthesis,
+            run.RepositoryCommit
+                ?? throw new InvalidOperationException("Collaboration synthesis requires a pinned repository commit."),
+            cancellationToken);
+    }
+
+    [Function(nameof(GenerateCollaborativePlan))]
+    public Task GenerateCollaborativePlan(
+        [ActivityTrigger] PlanGenerationRequest request, CancellationToken cancellationToken)
+        => GeneratePlanAsync(request, cancellationToken);
+
+    private async Task GeneratePlanAsync(
+        PlanGenerationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var run = await store.GetAsync(request.RunId, cancellationToken);
+        if (!run.BusinessAnalystApproved)
+        {
+            throw new InvalidOperationException("Developer planning requires business analyst approval.");
+        }
+        var architecture = await store.GetCurrentArchitectureArtifactAsync(request.RunId, cancellationToken);
+        if (architecture?.Status != WorkflowArtifactStatuses.Approved ||
+            architecture.Decision != ArchitectureAnalysisDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException("Developer planning requires human approval of the architecture analysis.");
+        }
         if (run.PlanRevision >= request.Revision)
         {
             return;
         }
-        logger.LogInformation("Generating draft plan revision {Revision} for run {RunId}.", request.Revision, request.RunId);
+        var specificationRevision = await store.GetFeatureSpecificationRevisionAsync(
+            request.RunId, run.FeatureSpecificationRevision, cancellationToken);
+        if (specificationRevision?.Decision != BusinessAnalystDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException("The persisted feature specification is not approved.");
+        }
+        var (previousPlan, feedback) =
+            await store.GetRevisionContextAsync(request.RunId, request.Revision, cancellationToken);
+        var specification = System.Text.Json.JsonSerializer.Deserialize<FeatureSpecification>(
+            specificationRevision.SpecificationJson, System.Text.Json.JsonSerializerOptions.Web)
+            ?? throw new InvalidDataException("The approved feature specification is invalid.");
         var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
-        var (previousPlan, feedback) = await store.GetRevisionContextAsync(request.RunId, request.Revision, cancellationToken);
+        var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(request.RunId, cancellationToken);
+        var specialistAnalyses = await store.GetDeveloperSkillAnalysesAsync(
+            request.RunId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Developer planning requires completed analysis from every captured developer skill.");
+        var collaborationSynthesis = await store.GetCollaborationSynthesisAsync(request.RunId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Collaborative planning requires a completed, source-linked cross-role synthesis.");
+        var reviewerMatches = await store.GetSelectedReviewersAsync(request.RunId, cancellationToken);
+        if (reviewerMatches is null)
+        {
+            var developerProfiles = await store.GetEnabledDeveloperProfilesAsync(cancellationToken);
+            reviewerMatches = await reviewerSelector.SelectAsync(
+                run.Text, specification, developerProfiles, run.ReviewerCount, cancellationToken);
+        }
         var plan = await planner.CreateAsync(
-            run.ProductBrief, run.Text, previousPlan, feedback, request.Revision, catalog, cancellationToken);
-        await store.StorePlanAsync(request.RunId, request.Revision, plan, cancellationToken);
+            run.ProductBrief, run.Text, specification, previousPlan, feedback,
+            request.Revision, catalog, repositorySnapshot.Files, cancellationToken,
+            specialistAnalyses, collaborationSynthesis);
+        await store.StorePlanAsync(request.RunId, request.Revision, plan, cancellationToken, reviewerMatches);
     }
 
     [Function(nameof(RecordOutcome))]
@@ -130,9 +457,58 @@ public sealed class FeatureWorkflow(
         var existing = await client.GetInstanceAsync(instanceId, cancellation: cancellationToken);
         if (existing is null)
         {
-            await client.ScheduleNewOrchestrationInstanceAsync(nameof(FeaturePlanWorkflow), id,
+            await client.ScheduleNewOrchestrationInstanceAsync(nameof(BusinessAnalystFeatureWorkflow), id,
                 new StartOrchestrationOptions { InstanceId = instanceId }, cancellationToken);
         }
+        return new AcceptedResult();
+    }
+
+    [Function(nameof(BusinessAnalystDecisionDelivery))]
+    public async Task<IActionResult> BusinessAnalystDecisionDelivery(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "internal/runs/{id:guid}/spec-decision")] HttpRequest request,
+        Guid id, [DurableClient] DurableTaskClient client, CancellationToken cancellationToken)
+    {
+        if (!IsAuthorized(request))
+        {
+            return new UnauthorizedResult();
+        }
+        var body = await request.ReadFromJsonAsync<DecisionDelivery>(cancellationToken);
+        if (body is null || body.Revision < 1)
+        {
+            return new BadRequestObjectResult(new { error = "Feature specification revision required." });
+        }
+        var record = await store.GetFeatureSpecificationRevisionAsync(id, body.Revision, cancellationToken);
+        if (record?.Decision is null)
+        {
+            return new ConflictObjectResult(new { error = "Persisted business analyst decision required." });
+        }
+        await client.RaiseEventAsync(id.ToString("N"), "business-analyst-decision",
+            new BusinessAnalystDecision(record.Revision, record.Decision, record.Comment), cancellationToken);
+        return new AcceptedResult();
+    }
+
+    [Function(nameof(ArchitectureDecisionDelivery))]
+    public async Task<IActionResult> ArchitectureDecisionDelivery(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "internal/runs/{id:guid}/architecture-decision")]
+        HttpRequest request,
+        Guid id, [DurableClient] DurableTaskClient client, CancellationToken cancellationToken)
+    {
+        if (!IsAuthorized(request))
+        {
+            return new UnauthorizedResult();
+        }
+        var body = await request.ReadFromJsonAsync<DecisionDelivery>(cancellationToken);
+        if (body is null || body.Revision < 1)
+        {
+            return new BadRequestObjectResult(new { error = "Architecture analysis revision required." });
+        }
+        var artifact = await store.GetCurrentArchitectureArtifactAsync(id, cancellationToken);
+        if (artifact?.Revision != body.Revision || artifact.Decision is null)
+        {
+            return new ConflictObjectResult(new { error = "Persisted architecture decision required." });
+        }
+        await client.RaiseEventAsync(id.ToString("N"), "architecture-decision",
+            new ArchitectureDecisionSignal(artifact.Revision, artifact.Decision), cancellationToken);
         return new AcceptedResult();
     }
 

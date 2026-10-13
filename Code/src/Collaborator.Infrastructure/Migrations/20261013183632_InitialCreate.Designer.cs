@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Collaborator.Infrastructure.Migrations
 {
     [DbContext(typeof(CollaboratorDb))]
-    [Migration("20261105120000_CodeChanges")]
-    partial class CodeChanges
+    [Migration("20261013183632_InitialCreate")]
+    partial class InitialCreate
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -24,6 +24,83 @@ namespace Collaborator.Infrastructure.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("Collaborator.Infrastructure.AgentSkillRecord", b =>
+                {
+                    b.Property<string>("RoleId")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("Domain")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("SkillId")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<int>("ActiveRevision")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<uint>("xmin")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("RoleId", "Domain", "SkillId");
+
+                    b.ToTable("AgentSkills");
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.AgentSkillRevisionRecord", b =>
+                {
+                    b.Property<string>("RoleId")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("Domain")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("SkillId")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ChangeReason")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Prompt")
+                        .IsRequired()
+                        .HasMaxLength(12000)
+                        .HasColumnType("character varying(12000)");
+
+                    b.HasKey("RoleId", "Domain", "SkillId", "Revision");
+
+                    b.ToTable("AgentSkillRevisions");
+                });
 
             modelBuilder.Entity("Collaborator.Infrastructure.CodeChangeRecord", b =>
                 {
@@ -85,6 +162,10 @@ namespace Collaborator.Infrastructure.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
+                    b.Property<string>("RolesJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
                     b.HasKey("UserId");
 
                     b.ToTable("Developers");
@@ -96,8 +177,31 @@ namespace Collaborator.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<bool?>("Approved")
+                    b.Property<bool>("BusinessAnalystApproved")
                         .HasColumnType("boolean");
+
+                    b.Property<string>("BusinessAnalystId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("BusinessAnalystPrompt")
+                        .IsRequired()
+                        .HasMaxLength(12000)
+                        .HasColumnType("character varying(12000)");
+
+                    b.Property<string>("BusinessAnalystSkillId")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("BusinessAnalystSkillName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("BusinessAnalystSkillRevision")
+                        .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -113,8 +217,15 @@ namespace Collaborator.Infrastructure.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
+                    b.Property<string>("DeveloperSkillsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("FailureCode")
                         .HasColumnType("text");
+
+                    b.Property<int>("FeatureSpecificationRevision")
+                        .HasColumnType("integer");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -144,6 +255,12 @@ namespace Collaborator.Infrastructure.Migrations
                     b.Property<string>("RepositoryUrl")
                         .HasColumnType("text");
 
+                    b.Property<int>("ReviewerCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SelectedReviewersJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasColumnType("text");
@@ -164,6 +281,49 @@ namespace Collaborator.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("Runs");
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.FeatureSpecificationRevisionRecord", b =>
+                {
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("AnswersJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Comment")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DecidedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecidedBy")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Decision")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("SpecificationJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<uint>("xmin")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("RunId", "Revision");
+
+                    b.ToTable("FeatureSpecificationRevisions");
                 });
 
             modelBuilder.Entity("Collaborator.Infrastructure.OutboxMessage", b =>
@@ -286,10 +446,18 @@ namespace Collaborator.Infrastructure.Migrations
                     b.Property<DateTimeOffset>("AssignedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("Decision")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
                     b.Property<string>("DeveloperDisplayName")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
+
+                    b.Property<string>("MatchedRolesJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
 
                     b.Property<DateTimeOffset?>("RespondedAt")
                         .HasColumnType("timestamp with time zone");
@@ -348,6 +516,173 @@ namespace Collaborator.Infrastructure.Migrations
                     b.ToTable("Events");
                 });
 
+            modelBuilder.Entity("Collaborator.Infrastructure.StageArtifactReviewRecord", b =>
+                {
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Stage")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ArtifactKey")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReviewerId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Comment")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Decision")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.HasKey("RunId", "Stage", "ArtifactKey", "Revision", "ReviewerId");
+
+                    b.ToTable("StageArtifactReviews");
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.StageQuestionRecord", b =>
+                {
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Stage")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ArtifactKey")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Index")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Answer")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<DateTimeOffset?>("AnsweredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AnsweredBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Question")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.HasKey("RunId", "Stage", "ArtifactKey", "Revision", "Index");
+
+                    b.ToTable("StageQuestions");
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.WorkflowArtifactRecord", b =>
+                {
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Stage")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ArtifactKey")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ArtifactType")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DecidedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecidedBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Decision")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("DecisionComment")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("InputArtifactRevisionsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("RepositoryCommit")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("SkillRevisionsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset?>("StaleAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StaleReason")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<uint>("xmin")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("RunId", "Stage", "ArtifactKey", "Revision");
+
+                    b.ToTable("WorkflowArtifacts");
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.AgentSkillRevisionRecord", b =>
+                {
+                    b.HasOne("Collaborator.Infrastructure.AgentSkillRecord", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId", "Domain", "SkillId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Collaborator.Infrastructure.CodeChangeRecord", b =>
                 {
                     b.HasOne("Collaborator.Infrastructure.FeatureRun", null)
@@ -362,6 +697,15 @@ namespace Collaborator.Infrastructure.Migrations
                     b.HasOne("Collaborator.Infrastructure.Product", null)
                         .WithMany()
                         .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.FeatureSpecificationRevisionRecord", b =>
+                {
+                    b.HasOne("Collaborator.Infrastructure.FeatureRun", null)
+                        .WithMany()
+                        .HasForeignKey("RunId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -400,6 +744,33 @@ namespace Collaborator.Infrastructure.Migrations
                 });
 
             modelBuilder.Entity("Collaborator.Infrastructure.RunEvent", b =>
+                {
+                    b.HasOne("Collaborator.Infrastructure.FeatureRun", null)
+                        .WithMany()
+                        .HasForeignKey("RunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.StageArtifactReviewRecord", b =>
+                {
+                    b.HasOne("Collaborator.Infrastructure.WorkflowArtifactRecord", null)
+                        .WithMany()
+                        .HasForeignKey("RunId", "Stage", "ArtifactKey", "Revision")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.StageQuestionRecord", b =>
+                {
+                    b.HasOne("Collaborator.Infrastructure.WorkflowArtifactRecord", null)
+                        .WithMany()
+                        .HasForeignKey("RunId", "Stage", "ArtifactKey", "Revision")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Collaborator.Infrastructure.WorkflowArtifactRecord", b =>
                 {
                     b.HasOne("Collaborator.Infrastructure.FeatureRun", null)
                         .WithMany()

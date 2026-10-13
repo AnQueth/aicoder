@@ -1,0 +1,7 @@
+@baseUrl = http://localhost:5076
+@apiKey = {{$dotenv COLLABORATOR_API_KEY}}
+@runId = 00000000-0000-0000-0000-000000000000
+
+### Get the cross-role synthesis for a run after specialist processing
+GET {{baseUrl}}/api/v1/runs/{{runId}}/collaboration
+X-Api-Key: {{apiKey}}

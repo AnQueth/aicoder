@@ -22,6 +22,29 @@ public sealed class CodeChangeService(
     {
         var run = await db.Runs.SingleAsync(x => x.Id == runId, cancellationToken);
         EnsureApproved(run);
+        var architecture = await db.WorkflowArtifacts.AsNoTracking()
+            .Where(x => x.RunId == runId && x.Stage == WorkflowStages.Architecture &&
+                x.ArtifactKey == "architecture-analysis")
+            .OrderByDescending(x => x.Revision)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (architecture?.Status != WorkflowArtifactStatuses.Approved ||
+            architecture.Decision != ArchitectureAnalysisDecisionKinds.Approve)
+        {
+            throw new InvalidOperationException(
+                "Code generation requires human approval of the current architecture analysis.");
+        }
+        var specialistAnalysis = await db.WorkflowArtifacts.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.RunId == runId &&
+                x.Stage == WorkflowStages.SpecialistAnalysis &&
+                x.ArtifactKey == "developer-skills" &&
+                x.Revision == 1 &&
+                x.Status == WorkflowArtifactStatuses.Completed,
+                cancellationToken);
+        if (specialistAnalysis is null)
+        {
+            throw new InvalidOperationException(
+                "Code generation requires analysis from every captured developer skill.");
+        }
 
         var existing = await db.CodeChanges.SingleOrDefaultAsync(x => x.RunId == runId, cancellationToken);
         if (existing?.PatchJson is not null)
@@ -37,6 +60,20 @@ public sealed class CodeChangeService(
         }
         var plan = JsonSerializer.Deserialize<DraftPlan>(revision.PlanJson, Json)
             ?? throw new InvalidDataException("The approved plan is invalid.");
+        FeatureSpecification? approvedSpecification = null;
+        if (run.FeatureSpecificationRevision > 0)
+        {
+            var specificationRevision = await db.FeatureSpecificationRevisions.AsNoTracking()
+                .SingleAsync(x => x.RunId == runId && x.Revision == run.FeatureSpecificationRevision, cancellationToken);
+            if (specificationRevision.Decision != BusinessAnalystDecisionKinds.Approve)
+            {
+                throw new InvalidOperationException("Code generation requires an approved feature specification.");
+            }
+            approvedSpecification = JsonSerializer.Deserialize<FeatureSpecification>(
+                specificationRevision.SpecificationJson, Json)
+                ?? throw new InvalidDataException("The approved feature specification is invalid.");
+            InputRules.ValidateFeatureSpecification(approvedSpecification);
+        }
         var catalog = run.RepositoryCatalogJson is null
             ? throw new InvalidDataException("Repository analysis is required before code generation.")
             : JsonSerializer.Deserialize<RepositoryCatalog>(run.RepositoryCatalogJson, Json)
@@ -46,6 +83,7 @@ public sealed class CodeChangeService(
         {
             productBrief = run.ProductBrief,
             featureRequest = run.Text,
+            approvedFeatureSpecification = approvedSpecification,
             approvedPlan = plan,
             repositoryCommit = snapshot.Commit,
             repositoryCatalog = catalog,
@@ -152,9 +190,11 @@ public sealed class CodeChangeService(
 
     private static void EnsureApproved(FeatureRun run)
     {
-        if (run.Decision != PlanDecisionKinds.Approve || run.Approved is not true)
+        if (!run.BusinessAnalystApproved ||
+            run.Decision != PlanDecisionKinds.Approve)
         {
-            throw new InvalidOperationException("Code generation is allowed only after an explicit plan approval.");
+            throw new InvalidOperationException(
+                "Code generation is allowed only after business analyst and developer plan approval.");
         }
     }
 }

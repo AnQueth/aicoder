@@ -17,6 +17,11 @@ internal sealed class ClientOptions
         "A small web application used to exercise the Collaborator feature-request flow end to end.";
     public string? ProductRepositoryUrl { get; private set; }
     public string? Feature { get; private set; }
+    public string BusinessAnalystId { get; private set; } = "default";
+    public string BusinessAnalystSkillId { get; private set; } = "requirements-analysis";
+    public string? BusinessAnalystSkillPrompt { get; private set; }
+    public string? ArchitectureSkillPrompt { get; private set; }
+    public int ReviewerCount { get; private set; } = 3;
     public Guid? ExistingRunId { get; private set; }
     public List<DeveloperOption> Developers { get; } = [];
     public Dictionary<string, string> ReviewResponses { get; } = new(StringComparer.Ordinal);
@@ -36,9 +41,9 @@ internal sealed class ClientOptions
         Usage:
           dotnet run --project src/Collaborator.ApiClient -- [options]
 
-        Flow: health -> configure developers -> register product -> submit feature ->
-              review developer assignments -> decide (revise with feedback, repeat) ->
-              approve/reject -> plan and assignment history + summary.
+        Flow: health -> configure skills and developers -> register product -> submit feature ->
+              BA clarification and approval -> architecture review -> cross-role collaboration ->
+              developer plan review and approval -> summary.
 
         Connection:
           --base-url <url>        API base URL (default http://localhost:5076; env COLLABORATOR_API_URL)
@@ -54,9 +59,16 @@ internal sealed class ClientOptions
           --feature <text>        Feature request text (prompted when interactive and omitted)
           --run <guid>            Attach to an existing run instead of submitting a new feature
 
+        Business analysis:
+          --business-analyst <id> BA skill owner (default "default")
+          --ba-skill <id>         Skill ID (default "requirements-analysis")
+          --ba-skill-prompt <text> Create or update the editable skill prompt (max 12000 chars)
+          --architecture-skill-prompt <text> Create or update the architecture skill prompt
+
         Developer reviews:
-          --developer <id|name|focus>  Configure a developer before plan generation (repeatable)
-          --review-response <id=text>  Submit a developer's response (repeatable, scripted)
+          --reviewer-count <n>         Developers selected for this run (default 3; range 1-10)
+          --developer <id|name|roles|focus> Configure developer profile (roles comma-separated; repeatable)
+          --review-response <id=decision[:feedback]> Submit developer review (approve/revise; repeatable)
 
         Decisions (scripted; any of these disables interactive prompts):
           --feedback <text>       Ask the AI to revise the plan with this feedback (repeatable, applied in order)
@@ -115,6 +127,11 @@ internal sealed class ClientOptions
                 case "--brief": options.ProductBrief = Next(); break;
                 case "--repository-url": options.ProductRepositoryUrl = Next(); break;
                 case "--feature": options.Feature = Next(); break;
+                case "--business-analyst": options.BusinessAnalystId = Next(); break;
+                case "--ba-skill": options.BusinessAnalystSkillId = Next(); break;
+                case "--ba-skill-prompt": options.BusinessAnalystSkillPrompt = Next(); break;
+                case "--architecture-skill-prompt": options.ArchitectureSkillPrompt = Next(); break;
+                case "--reviewer-count": options.ReviewerCount = ParsePositive(Next(), arg); break;
                 case "--developer": options.Developers.Add(ParseDeveloper(Next())); break;
                 case "--review-response":
                     var reviewResponse = Next();
@@ -150,6 +167,27 @@ internal sealed class ClientOptions
         if (options.ProductRepositoryUrl is not null && !InputRules.IsRepositoryUrl(options.ProductRepositoryUrl))
         {
             throw new ArgumentException("--repository-url must be a credential-free HTTPS, SSH, or file URL.");
+        }
+        if (!InputRules.IsText(options.BusinessAnalystId, 128) ||
+            !InputRules.IsProductId(options.BusinessAnalystSkillId))
+        {
+            throw new ArgumentException("--business-analyst must be a nonempty ID (max 128 chars) and --ba-skill a lowercase ID.");
+        }
+        if (!InputRules.IsValidReviewerCount(options.ReviewerCount))
+        {
+            throw new ArgumentException($"--reviewer-count must be between 1 and {InputRules.MaximumReviewerCount}.");
+        }
+        if (options.BusinessAnalystSkillPrompt is not null &&
+            !InputRules.IsText(options.BusinessAnalystSkillPrompt, InputRules.MaximumBusinessAnalystSkillPromptLength))
+        {
+            throw new ArgumentException(
+                $"--ba-skill-prompt must be nonempty and at most {InputRules.MaximumBusinessAnalystSkillPromptLength} characters.");
+        }
+        if (options.ArchitectureSkillPrompt is not null &&
+            !InputRules.IsText(options.ArchitectureSkillPrompt, InputRules.MaximumAgentSkillPromptLength))
+        {
+            throw new ArgumentException(
+                $"--architecture-skill-prompt must be nonempty and at most {InputRules.MaximumAgentSkillPromptLength} characters.");
         }
         options.Interactive = forceInteractive || (!scripted && !Console.IsInputRedirected);
         return options;
@@ -233,12 +271,14 @@ internal sealed class ClientOptions
 
     private static DeveloperOption ParseDeveloper(string value)
     {
-        var parts = value.Split('|', 3);
-        if (parts.Length < 2)
+        var parts = value.Split('|', 4);
+        if (parts.Length < 3)
         {
-            throw new ArgumentException("--developer requires id|display-name|optional-review-focus.");
+            throw new ArgumentException("--developer requires id|display-name|comma-separated-roles|optional-review-focus.");
         }
-        var developer = new DeveloperConfiguration(parts[1], parts.Length == 3 ? parts[2] : null);
+        var roles = parts[2].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var developer = new DeveloperConfiguration(
+            parts[1], parts.Length == 4 ? parts[3] : null, Roles: roles);
         if (!InputRules.IsValidDeveloper(parts[0], developer, out var error))
         {
             throw new ArgumentException($"Invalid --developer value: {error}");

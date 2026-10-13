@@ -1,7 +1,8 @@
 {
   "recommendations": [
-    "ms-dotnettools.csdevkit",
     "ms-azuretools.vscode-azurefunctions",
+    "ms-dotnettools.csharp",
+    "ms-dotnettools.csdevkit",
     "microsoft-aspire.aspire-vscode"
   ]
 }

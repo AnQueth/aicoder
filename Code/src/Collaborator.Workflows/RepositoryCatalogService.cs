@@ -44,7 +44,7 @@ public sealed class RepositoryCatalogService(
                 "A local file:// Git repository is required before a plan can be generated.");
         }
 
-        var snapshot = await ReadRepositoryAsync(run.RepositoryUrl!, null, cancellationToken);
+        var snapshot = await ReadRepositoryAsync(run.RepositoryUrl!, run.RepositoryCommit, cancellationToken);
         var product = await db.Products.SingleAsync(x => x.Id == run.ProductId, cancellationToken);
         RepositoryCatalog catalog;
         var reused = false;
@@ -100,15 +100,28 @@ public sealed class RepositoryCatalogService(
     /// <summary>Reads bounded text and the tracked-file inventory at a run's pinned commit.</summary>
     internal async Task<RepositorySnapshot> ReadForRunAsync(Guid runId, CancellationToken cancellationToken)
     {
-        var run = await db.Runs.AsNoTracking().SingleAsync(x => x.Id == runId, cancellationToken);
-        if (!InputRules.IsLocalFileRepositoryUrl(run.RepositoryUrl) ||
-            string.IsNullOrWhiteSpace(run.RepositoryCommit))
+        var snapshot = await TryReadForRunAsync(runId, cancellationToken);
+        return snapshot ?? throw new InvalidOperationException(
+            "A repository URL and pinned commit are required to generate code.");
+    }
+
+    /// <summary>Reads and pins a local repository snapshot when one is configured for the run.</summary>
+    internal async Task<RepositorySnapshot?> TryReadForRunAsync(
+        Guid runId, CancellationToken cancellationToken)
+    {
+        var run = await db.Runs.SingleAsync(x => x.Id == runId, cancellationToken);
+        if (!InputRules.IsLocalFileRepositoryUrl(run.RepositoryUrl))
         {
-            throw new InvalidOperationException("A repository URL and pinned commit are required to generate code.");
+            return null;
         }
 
         var snapshot = await ReadRepositoryAsync(run.RepositoryUrl!, run.RepositoryCommit, cancellationToken);
-        if (!string.Equals(snapshot.Commit, run.RepositoryCommit, StringComparison.OrdinalIgnoreCase))
+        if (run.RepositoryCommit is null)
+        {
+            run.RepositoryCommit = snapshot.Commit;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        else if (!string.Equals(snapshot.Commit, run.RepositoryCommit, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException("The repository snapshot does not match the run-pinned commit.");
         }

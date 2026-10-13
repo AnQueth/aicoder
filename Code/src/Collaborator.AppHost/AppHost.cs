@@ -6,7 +6,7 @@ var apiKey = builder.AddParameter("api-key", secret: true);
 var workflowKey = builder.AddParameter("workflow-key", secret: true);
 var database = builder.AddPostgres("postgres")
     .WithImageTag("17")
-    .WithDataVolume("collaborator-postgres-data")
+    .WithDataVolume("collaborator-postgres-data-v2")
     .AddDatabase("collaborator");
 // Local Key Vault emulator (Docker). Secret names use "--" which maps to ":" in .NET configuration.
 var keyVault = builder.AddAzureKeyVault("keyvault")
@@ -22,6 +22,7 @@ var migrations = builder.AddProject<Projects.Collaborator_Migrator>("migrations"
     .WaitFor(database);
 var mode = builder.Configuration["Agents:Mode"] ?? "Copilot";
 var workflows = builder.AddAzureFunctionsProject<Projects.Collaborator_Workflows>("workflows")
+    .WithHttpEndpoint(targetPort: 7119)
     .WithHostStorage(storage)
     .WithReference(database)
     .WithReference(keyVault)

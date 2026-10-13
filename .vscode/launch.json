@@ -21,10 +21,14 @@
       "preLaunchTask": "Collaborator: build API test client",
       "program": "${workspaceFolder}/Code/src/Collaborator.ApiClient/bin/Debug/net10.0/collab-client.dll",
       "args": [
-        "--product", "taskboard-sample",
-        "--product-name", "Taskboard Sample",
-        "--brief", "A small task board web app used as the sample target for Collaborator feature requests.",
-        "--repository-url", "file:///H:/src/collaborator-sample-app-remote.git",
+        "--product",
+        "taskboard-sample",
+        "--product-name",
+        "Taskboard Sample",
+        "--brief",
+        "A small task board web app used as the sample target for Collaborator feature requests.",
+        "--repository-url",
+        "file:///H:/src/collaborator-sample-app-remote.git",
         "--interactive"
       ],
       "cwd": "${workspaceFolder}/Code",
@@ -44,6 +48,12 @@
         "ASPNETCORE_ENVIRONMENT": "Development",
         "ASPNETCORE_URLS": "http://localhost:5088"
       }
+    },
+    {
+      "name": "Attach to .NET Functions",
+      "type": "coreclr",
+      "request": "attach",
+      "processId": "${command:azureFunctions.pickProcess}"
     }
   ]
 }
