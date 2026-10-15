@@ -58,8 +58,7 @@ public sealed class RunStore(CollaboratorDb db)
         var snapshots = JsonSerializer.Deserialize<DeveloperSkillSnapshot[]>(
             serialized, JsonSerializerOptions.Web)
             ?? throw new InvalidDataException("Persisted developer skill snapshots are invalid.");
-        if (snapshots.Length == 0 ||
-            snapshots.Any(snapshot => snapshot is null || snapshot.Skill is null ||
+        if (snapshots.Any(snapshot => snapshot is null || snapshot.Skill is null ||
                 !InputRules.IsProductId(snapshot.Skill.RoleId) ||
                 !snapshot.Skill.RoleId.StartsWith("developer-", StringComparison.Ordinal) ||
                 !InputRules.IsProductId(snapshot.Skill.Domain) ||

@@ -32,8 +32,8 @@ The [Code foundation](Code/README.md) targets .NET 10 and uses Aspire, PostgreSQ
 Azurite, Durable Functions, the Copilot SDK, and a Key Vault emulator. It provides editable/versioned role-and-domain skills, submission-time skill
 snapshots, formal feature specification editing/revision/rejection/approval,
 repository-grounded architecture analysis with revision-bound human review,
-submission-time snapshots of every enabled `developer-*` skill, one analysis per
-captured skill, developer review assignments, plan revision/approval, bounded patch
+submission-time snapshots of selected enabled `developer-*` skills, one analysis per
+captured skill, developer review assignments, plan revision/approval, worktree patch
 generation, and publication to a review branch in an HTTPS, SSH, or local Git
 repository, starting from a configurable base branch pinned per run. The API
 has a shared development key; supplied actor IDs are not authenticated identities
@@ -386,16 +386,15 @@ Expose stable public run states and blockers without leaking credentials, raw pr
 - Editable, versioned business-analyst skill prompts and a submission-time prompt snapshot.
 - Formal, revisioned feature specification with BA editing, feedback, rejection, and approval before planning.
 - Repository-grounded, revisioned architecture analysis after BA approval, with source evidence, provenance, human approve/revise/reject decisions, and enforced approval before plan generation.
-- Every enabled `developer-*` skill is snapshotted at feature submission, processed in its own bounded Durable activity against the approved requirements and architecture, persisted with provenance, and included in plan-generation context after complete-set validation.
+- Selected enabled `developer-*` skills are snapshotted at feature submission, processed in bounded Durable activities, persisted with provenance, and included in planning after complete-set validation. Users can choose an explicit subset, omit selection for enabled registry defaults, or choose none; prompts define role expertise rather than hardcoded specialist rules.
 - Cross-role synthesis before planning, with agreements, conflicts, and unresolved questions linked to exact source skill revisions; preserve raw role outputs and surface both for human plan review.
 - Approved implementation-plan template and criterion-to-step/test mapping.
 - Plan approval, rejection, revision requests, and policy-based authorization.
 - BA approval binds to the exact specification revision; developer approval binds to the exact plan and relevant context revisions.
 - Code generation is blocked until the BA specification, architecture analysis, complete specialist analysis set, required cross-role synthesis, and developer plan approvals are recorded.
 - Explicit artifact staleness and reevaluation after material upstream changes.
-- Use one canonical orchestration; before deploying workflow changes, ensure no
-  active instances depend on an older implementation. This new product does not
-  maintain backward-compatible orchestration or activity versions.
+- Use one canonical orchestration and deploy the API, worker, client, and scripts
+  together. Finish active instances before changing their orchestration.
 
 **Verify**
 

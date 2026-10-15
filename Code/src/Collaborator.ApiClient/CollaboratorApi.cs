@@ -29,10 +29,6 @@ internal sealed record FeatureSpecificationRevisionView(
     string? DecidedBy, DateTimeOffset? DecidedAt, FeatureSpecification? Specification,
     BusinessAnalystQuestionAnswer[]? Answers = null);
 
-internal sealed record BusinessAnalystSkillView(
-    string AnalystId, string SkillId, string Name, string Prompt, int Revision, bool IsEnabled,
-    DateTimeOffset UpdatedAt);
-
 internal sealed record AgentSkillView(
     string RoleId, string Domain, string SkillId, string Name, string Prompt, int ActiveRevision,
     bool IsEnabled, DateTimeOffset UpdatedAt);
@@ -88,17 +84,6 @@ internal sealed class CollaboratorApi(HttpClient http, Action<string>? trace)
         SendAsync<JsonElement>(HttpMethod.Put,
             $"/api/v1/developers/{Uri.EscapeDataString(userId)}", developer, null, ct);
 
-    public Task<ApiResult<BusinessAnalystSkillView[]>> GetBusinessAnalystSkillsAsync(
-        string analystId, CancellationToken ct) =>
-        SendAsync<BusinessAnalystSkillView[]>(
-            HttpMethod.Get, $"/api/v1/business-analysts/{Uri.EscapeDataString(analystId)}/skills", null, null, ct);
-
-    public Task<ApiResult<JsonElement>> ConfigureBusinessAnalystSkillAsync(
-        string analystId, string skillId, BusinessAnalystSkillConfiguration skill, CancellationToken ct) =>
-        SendAsync<JsonElement>(HttpMethod.Put,
-            $"/api/v1/business-analysts/{Uri.EscapeDataString(analystId)}/skills/{Uri.EscapeDataString(skillId)}",
-            skill, null, ct);
-
     public Task<ApiResult<AgentSkillView[]>> GetAgentSkillsAsync(
         string roleId, string domain, CancellationToken ct) =>
         SendAsync<AgentSkillView[]>(HttpMethod.Get,
@@ -126,9 +111,10 @@ internal sealed class CollaboratorApi(HttpClient http, Action<string>? trace)
 
     public Task<ApiResult<SubmissionView>> SubmitFeatureAsync(
         string productId, string text, string idempotencyKey, string businessAnalystId,
-        string businessAnalystSkillId, int reviewerCount, CancellationToken ct) =>
+        string businessAnalystSkillId, int reviewerCount, CancellationToken ct,
+        DeveloperSkillSelection[]? developerSkills = null) =>
         SendAsync<SubmissionView>(HttpMethod.Post, $"/api/v1/products/{Uri.EscapeDataString(productId)}/feature-requests",
-            new FeatureSubmission(text, businessAnalystId, businessAnalystSkillId, reviewerCount), idempotencyKey, ct);
+            new FeatureSubmission(text, businessAnalystId, businessAnalystSkillId, reviewerCount, developerSkills), idempotencyKey, ct);
 
     public Task<ApiResult<RunView>> GetRunAsync(Guid runId, CancellationToken ct) =>
         SendAsync<RunView>(HttpMethod.Get, $"/api/v1/runs/{runId}", null, null, ct);

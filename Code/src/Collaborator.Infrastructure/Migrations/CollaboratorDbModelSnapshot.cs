@@ -214,6 +214,9 @@ namespace Collaborator.Infrastructure.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
+                    b.Property<string>("DeveloperSkillSelectionJson")
+                        .HasColumnType("text");
+
                     b.Property<string>("DeveloperSkillsJson")
                         .IsRequired()
                         .HasColumnType("jsonb");

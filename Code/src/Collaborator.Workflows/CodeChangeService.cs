@@ -9,7 +9,7 @@ using System.Text.Json;
 
 namespace Collaborator.Workflows;
 
-/// <summary>Creates a bounded Copilot patch and publishes it to an isolated review branch.</summary>
+/// <summary>Collects Copilot changes and publishes them to an isolated review branch.</summary>
 public sealed class CodeChangeService(
     CollaboratorDb db,
     ICodeChangeGenerator generator,
@@ -211,8 +211,6 @@ public sealed class CodeChangeService(
 
 internal static class GitWorktreeChanges
 {
-    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-
     public static async Task<CodeChangeProposal> ReadProposalAsync(
         string worktreePath,
         string baseCommit,
@@ -246,19 +244,13 @@ internal static class GitWorktreeChanges
         {
             throw new InvalidDataException("Copilot completed without changing files in its feature worktree.");
         }
-        if (paths.Length > InputRules.MaximumCodeChangeFiles)
-        {
-            throw new InvalidDataException("The feature worktree exceeds the implementation patch file limit.");
-        }
-
         var changes = new List<CodeFileChange>(paths.Length);
-        long totalBytes = 0;
         foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!RepositorySourceTools.IsEligibleSourcePath(path))
+            if (!InputRules.IsSafeCodeChangePath(path))
             {
-                throw new InvalidDataException($"The feature worktree contains an ineligible changed path '{path}'.");
+                throw new InvalidDataException($"The feature worktree contains an unsafe changed path '{path}'.");
             }
 
             var fullPath = ResolveWorktreePath(worktreePath, path);
@@ -274,31 +266,12 @@ internal static class GitWorktreeChanges
             }
 
             EnsureRegularFile(worktreePath, fullPath, path);
-            var fileLength = new FileInfo(fullPath).Length;
-            if (fileLength > InputRules.MaximumCodeChangeFileLength * 4L + 3)
-            {
-                throw new InvalidDataException($"The changed worktree file '{path}' exceeds the file size limit.");
-            }
-            totalBytes += fileLength;
-            if (totalBytes > InputRules.MaximumCodeChangeContentLength * 4L + 3L * paths.Length)
-            {
-                throw new InvalidDataException("The feature worktree exceeds the implementation patch content limit.");
-            }
             var bytes = await File.ReadAllBytesAsync(fullPath, cancellationToken);
-            string content;
-            try
-            {
-                content = StrictUtf8.GetString(bytes);
-            }
-            catch (DecoderFallbackException exception)
-            {
-                throw new InvalidDataException($"The changed worktree file '{path}' is not valid UTF-8 text.", exception);
-            }
 
             changes.Add(new CodeFileChange(
                 path,
                 tracked ? CodeFileOperations.Update : CodeFileOperations.Add,
-                content));
+                bytes));
         }
 
         return new CodeChangeProposal(summary, changes.ToArray());
@@ -471,7 +444,8 @@ internal static class GitReviewBranch
             }
 
             var blob = (await RepositoryCatalogService.RunGitAsync(
-                clonePath, ["hash-object", "-w", "--stdin"], cancellationToken, file.Content)).Trim();
+                clonePath, ["hash-object", "-w", "--stdin"], cancellationToken,
+                standardInputBytes: file.Content)).Trim();
             if (blob.Length is not (40 or 64) || !blob.All(Uri.IsHexDigit))
             {
                 throw new InvalidDataException($"Git returned an invalid object identifier for '{file.Path}'.");

@@ -25,6 +25,7 @@ internal sealed class ClientOptions
     public int ReviewerCount { get; private set; } = 3;
     public Guid? ExistingRunId { get; private set; }
     public List<DeveloperOption> Developers { get; } = [];
+    public List<DeveloperSkillSelection>? DeveloperSkills { get; private set; }
     public Dictionary<string, string> ReviewResponses { get; } = new(StringComparer.Ordinal);
     public List<string> Feedback { get; } = [];
     public string? FinalDecision { get; private set; }
@@ -62,12 +63,14 @@ internal sealed class ClientOptions
           --run <guid>            Attach to an existing run instead of submitting a new feature
 
         Business analysis:
-          --business-analyst <id> BA skill owner (default "default")
+          --business-analyst <id> BA actor label (default "default")
           --ba-skill <id>         Skill ID (default "requirements-analysis")
           --ba-skill-prompt <text> Create or update the editable skill prompt (max 12000 chars)
           --architecture-skill-prompt <text> Create or update the architecture skill prompt
 
         Developer reviews:
+          --specialist <role/domain/skill> Select a configured specialist (repeatable; omitted uses enabled skills)
+          --no-specialists            Skip specialist analyses and synthesis for this run
           --reviewer-count <n>         Developers selected for this run (default 3; range 1-10)
           --developer <id|name|roles|focus> Configure developer profile (roles comma-separated; repeatable)
           --review-response <id=decision[:feedback]> Submit developer review (approve/revise; repeatable)
@@ -141,6 +144,26 @@ internal sealed class ClientOptions
                 case "--architecture-skill-prompt": options.ArchitectureSkillPrompt = Next(); break;
                 case "--reviewer-count": options.ReviewerCount = ParsePositive(Next(), arg); break;
                 case "--developer": options.Developers.Add(ParseDeveloper(Next())); break;
+                case "--specialist":
+                    if (options.DeveloperSkills is { Count: 0 })
+                    {
+                        throw new ArgumentException("--specialist and --no-specialists cannot be combined.");
+                    }
+                    var parts = Next().Split('/');
+                    if (parts.Length != 3)
+                    {
+                        throw new ArgumentException("--specialist requires role/domain/skill.");
+                    }
+                    options.DeveloperSkills ??= [];
+                    options.DeveloperSkills.Add(new DeveloperSkillSelection(parts[0], parts[1], parts[2]));
+                    break;
+                case "--no-specialists":
+                    if (options.DeveloperSkills is not null)
+                    {
+                        throw new ArgumentException("--no-specialists cannot be repeated or combined with --specialist.");
+                    }
+                    options.DeveloperSkills = [];
+                    break;
                 case "--review-response":
                     var reviewResponse = Next();
                     var separator = reviewResponse.IndexOf('=');
@@ -206,6 +229,15 @@ internal sealed class ClientOptions
                 $"--architecture-skill-prompt must be nonempty and at most {InputRules.MaximumAgentSkillPromptLength} characters.");
         }
         options.Interactive = forceInteractive || (!scripted && !Console.IsInputRedirected);
+        if (!InputRules.IsValidFeatureSubmission(new FeatureSubmission(
+            "Validate specialist selection.", DeveloperSkills: options.DeveloperSkills?.ToArray()), out var selectionError))
+        {
+            throw new ArgumentException(selectionError);
+        }
+        if (options.ExistingRunId is not null && options.DeveloperSkills is not null)
+        {
+            throw new ArgumentException("Specialist selection cannot be changed when attaching with --run.");
+        }
         return options;
     }
 

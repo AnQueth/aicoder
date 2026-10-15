@@ -236,8 +236,13 @@ public sealed class RepositoryCatalogService(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
         string? standardInput = null,
-        IReadOnlyDictionary<string, string>? environment = null)
+        IReadOnlyDictionary<string, string>? environment = null,
+        byte[]? standardInputBytes = null)
     {
+        if (standardInput is not null && standardInputBytes is not null)
+        {
+            throw new ArgumentException("Git input must be either text or bytes, not both.");
+        }
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -246,7 +251,7 @@ public sealed class RepositoryCatalogService(
                 WorkingDirectory = workingDirectory,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                RedirectStandardInput = standardInput is not null,
+                RedirectStandardInput = standardInput is not null || standardInputBytes is not null,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 StandardOutputEncoding = Encoding.UTF8,
@@ -281,7 +286,12 @@ public sealed class RepositoryCatalogService(
         var errorTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
         try
         {
-            if (standardInput is not null)
+            if (standardInputBytes is not null)
+            {
+                await process.StandardInput.BaseStream.WriteAsync(standardInputBytes, timeout.Token);
+                process.StandardInput.Close();
+            }
+            else if (standardInput is not null)
             {
                 await process.StandardInput.WriteAsync(standardInput.AsMemory(), timeout.Token);
                 process.StandardInput.Close();

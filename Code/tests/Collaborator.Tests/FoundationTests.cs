@@ -351,6 +351,71 @@ public sealed class FoundationTests
             new RepositorySourceTools([new RepositoryFileEvidence(path, "text")]));
 
     [TestMethod]
+    [DataRow("tests/taskboard.test.js")]
+    [DataRow("tests/taskboard.test.mjs")]
+    [DataRow(".github/workflows/check.yml")]
+    [DataRow("appsettings.json")]
+    [DataRow("package-lock.json")]
+    [DataRow("src/client-secret.cs")]
+    [DataRow("node_modules/test.mjs")]
+    [DataRow(".hidden/test.mjs")]
+    [DataRow("assets/icon.png")]
+    [DataRow("LICENSE")]
+    public void CodeChange_RepositoryFileTypes_AcceptsAddUpdateAndDelete(string path)
+    {
+        var trackedFiles = new Dictionary<string, string>(StringComparer.Ordinal);
+        InputRules.ValidateCodeChange(new CodeChangeProposal("Add JavaScript tests.", [
+            new(path, CodeFileOperations.Add, "import assert from 'node:assert/strict';"u8.ToArray())
+        ]), trackedFiles);
+
+        trackedFiles[path] = "100644";
+        InputRules.ValidateCodeChange(new CodeChangeProposal("Update JavaScript tests.", [
+            new(path, CodeFileOperations.Update, "import test from 'node:test';"u8.ToArray())
+        ]), trackedFiles);
+        InputRules.ValidateCodeChange(new CodeChangeProposal("Remove JavaScript tests.", [
+            new(path, CodeFileOperations.Delete, null)
+        ]), trackedFiles);
+    }
+
+    [TestMethod]
+    [DataRow("../outside.mjs")]
+    [DataRow("/outside.mjs")]
+    [DataRow("C:/outside.mjs")]
+    [DataRow("tests\\outside.mjs")]
+    [DataRow(".git/config")]
+    [DataRow(".GIT./config")]
+    [DataRow("tests/../outside.mjs")]
+    public void CodeChange_RepositoryPaths_RejectsEscapesAndGitMetadata(string path)
+    {
+        Assert.ThrowsExactly<InvalidDataException>(() => InputRules.ValidateCodeChange(
+            new CodeChangeProposal("Invalid module.", [
+                new(path, CodeFileOperations.Add, "export {};"u8.ToArray())
+            ]), new Dictionary<string, string>(StringComparer.Ordinal)));
+    }
+
+    [TestMethod]
+    public void CodeChange_LargeBinaryPatch_HasNoFileCountOrContentCaps()
+    {
+        var bytes = new byte[200_001];
+        bytes[0] = 0xff;
+        bytes[^1] = 0x80;
+        var files = Enumerable.Range(0, 40)
+            .Select(index => new CodeFileChange(
+                $"assets/{new string('a', 100)}/{new string('b', 100)}/{new string('c', 50)}/{index}.bin",
+                CodeFileOperations.Add, bytes))
+            .ToArray();
+        var proposal = new CodeChangeProposal("Large binary patch.", files);
+
+        InputRules.ValidateCodeChange(proposal, new Dictionary<string, string>(StringComparer.Ordinal));
+        var json = JsonSerializer.Serialize(proposal, JsonSerializerOptions.Web);
+        var restored = JsonSerializer.Deserialize<CodeChangeProposal>(json, JsonSerializerOptions.Web);
+
+        Assert.IsNotNull(restored);
+        Assert.HasCount(40, restored.Files);
+        CollectionAssert.AreEqual(bytes, restored.Files[^1].Content);
+    }
+
+    [TestMethod]
     public void CodeChangeRequiresSafeUniquePathsAndMatchingOperations()
     {
         var trackedFiles = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -359,8 +424,8 @@ public sealed class FoundationTests
             ["link.cs"] = "120000"
         };
         var valid = new CodeChangeProposal("Add the feature.", [
-            new("src/Feature.cs", CodeFileOperations.Update, "updated"),
-            new("tests/FeatureTests.cs", CodeFileOperations.Add, "test"),
+            new("src/Feature.cs", CodeFileOperations.Update, "updated"u8.ToArray()),
+            new("tests/FeatureTests.cs", CodeFileOperations.Add, "test"u8.ToArray()),
             new("src/Old.cs", CodeFileOperations.Delete, null)
         ]);
         trackedFiles["src/Old.cs"] = "100755";
@@ -368,15 +433,15 @@ public sealed class FoundationTests
 
         var invalidPatches = new[]
         {
-            new CodeChangeProposal("Unsafe path.", [new("../outside.cs", CodeFileOperations.Add, "x")]),
-            new CodeChangeProposal("Secret path.", [new("src/appsettings.json", CodeFileOperations.Add, "x")]),
-            new CodeChangeProposal("Existing add.", [new("src/Feature.cs", CodeFileOperations.Add, "x")]),
-            new CodeChangeProposal("Symlink update.", [new("link.cs", CodeFileOperations.Update, "x")]),
+            new CodeChangeProposal("Unsafe path.", [new("../outside.cs", CodeFileOperations.Add, "x"u8.ToArray())]),
+            new CodeChangeProposal("Missing content.", [new("src/Feature.cs", CodeFileOperations.Update, null)]),
+            new CodeChangeProposal("Existing add.", [new("src/Feature.cs", CodeFileOperations.Add, "x"u8.ToArray())]),
+            new CodeChangeProposal("Symlink update.", [new("link.cs", CodeFileOperations.Update, "x"u8.ToArray())]),
             new CodeChangeProposal("Duplicate path.", [
-                new("src/Feature.cs", CodeFileOperations.Update, "x"),
-                new("src/Feature.cs", CodeFileOperations.Update, "y")
+                new("src/Feature.cs", CodeFileOperations.Update, "x"u8.ToArray()),
+                new("src/Feature.cs", CodeFileOperations.Update, "y"u8.ToArray())
             ]),
-            new CodeChangeProposal("Missing content.", [new("src/Feature.cs", CodeFileOperations.Delete, "x")])
+            new CodeChangeProposal("Unexpected content.", [new("src/Feature.cs", CodeFileOperations.Delete, "x"u8.ToArray())])
         };
         foreach (var invalid in invalidPatches)
         {
@@ -931,11 +996,12 @@ public sealed class FoundationTests
 
     [TestMethod]
     [DoNotParallelize]
-    [DataRow(null, "file")]
-    [DataRow("release/stable", "https")]
-    [DataRow("develop", "ssh")]
+    [DataRow(null, "file", false)]
+    [DataRow("release/stable", "https", false)]
+    [DataRow("develop", "ssh", false)]
+    [DataRow(null, "file", true)]
     public async Task ApprovedCodeChangePublishesOnlyAReviewBranchFromPinnedCommit(
-        string? configuredBranch, string transport)
+        string? configuredBranch, string transport, bool noSpecialists)
     {
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"collaborator-test-{Guid.NewGuid():N}");
         var sourcePath = Path.Combine(temporaryRoot, "source");
@@ -1013,7 +1079,7 @@ public sealed class FoundationTests
                 PlanRevision = 1,
                 Decision = PlanDecisionKinds.Approve,
                 Status = "code_change_generating",
-                DeveloperSkillsJson = JsonSerializer.Serialize(new[]
+                DeveloperSkillsJson = JsonSerializer.Serialize(noSpecialists ? [] : new[]
                 {
                     new DeveloperSkillSnapshot(
                         new AgentSkillRevisionReference(
@@ -1057,7 +1123,7 @@ public sealed class FoundationTests
                 ArtifactKey = "developer-skills",
                 Revision = 1,
                 ArtifactType = nameof(DeveloperSkillAnalysis),
-                PayloadJson = JsonSerializer.Serialize(new[]
+                PayloadJson = JsonSerializer.Serialize(noSpecialists ? [] : new[]
                 {
                     new DeveloperSkillAnalysis(
                         "developer-general", "general", "implementation-analysis",
@@ -1069,10 +1135,17 @@ public sealed class FoundationTests
             await db.SaveChangesAsync();
 
             var proposal = new CodeChangeProposal("Document the feature.", [
-                new("README.md", CodeFileOperations.Update, "Updated by the generated patch.\n"),
-                new("docs/feature.md", CodeFileOperations.Add, "Review this feature.\n"),
-                new("docs/remove.md", CodeFileOperations.Delete, null)
+                new("README.md", CodeFileOperations.Update, "Updated by the generated patch.\n"u8.ToArray()),
+                new("docs/feature.md", CodeFileOperations.Add, "Review this feature.\n"u8.ToArray()),
+                new("docs/remove.md", CodeFileOperations.Delete, null),
+                new(".github/workflows/check.yml", CodeFileOperations.Add, "name: check\n"u8.ToArray()),
+                new("appsettings.json", CodeFileOperations.Add, "{}\n"u8.ToArray()),
+                new("package.lock", CodeFileOperations.Add, "fixture\n"u8.ToArray()),
+                new("LICENSE", CodeFileOperations.Add, "Fixture license text.\n"u8.ToArray()),
+                new("assets/image.bin", CodeFileOperations.Add, new byte[200_001])
             ]);
+            proposal.Files[^1].Content![0] = 0xff;
+            proposal.Files[^1].Content![^1] = 0x80;
             var generator = new RecordingCodeChangeGenerator(proposal);
             var catalogService = new RepositoryCatalogService(
                 db, new FixtureCatalogGenerator(catalog.Functionalities), NullLogger<RepositoryCatalogService>.Instance);
@@ -1137,6 +1210,21 @@ public sealed class FoundationTests
             Assert.AreEqual(change.BranchCommit, remoteCommit);
             Assert.AreEqual("Updated by the generated patch.\n", publishedContent);
             Assert.AreEqual("Review this feature.\n", publishedAddedContent);
+            var persistedPatch = JsonSerializer.Deserialize<CodeChangeProposal>(change.PatchJson!, JsonSerializerOptions.Web);
+            Assert.IsNotNull(persistedPatch);
+            CollectionAssert.AreEqual(proposal.Files[^1].Content,
+                persistedPatch.Files.Single(file => file.Path == "assets/image.bin").Content);
+            var expectedBinaryPath = Path.Combine(temporaryRoot, "expected.bin");
+            await File.WriteAllBytesAsync(expectedBinaryPath, proposal.Files[^1].Content!);
+            var expectedBlob = (await RunTestGitAsync(temporaryRoot,
+                "--git-dir", remotePath, "hash-object", expectedBinaryPath)).Trim();
+            var publishedBlob = (await RunTestGitAsync(temporaryRoot,
+                "--git-dir", remotePath, "rev-parse", $"{refName}:assets/image.bin")).Trim();
+            Assert.AreEqual(expectedBlob, publishedBlob);
+            Assert.AreEqual("{}\n", await RunTestGitAsync(temporaryRoot,
+                "--git-dir", remotePath, "show", $"{refName}:appsettings.json"));
+            Assert.AreEqual("name: check\n", await RunTestGitAsync(temporaryRoot,
+                "--git-dir", remotePath, "show", $"{refName}:.github/workflows/check.yml"));
             Assert.AreEqual(string.Empty, baseAddedPath);
             Assert.AreEqual(string.Empty, publishedDeletedPath);
             Assert.AreEqual($"collaborator/feature-{runId:N}", change.BranchName);
@@ -1193,7 +1281,7 @@ public sealed class FoundationTests
         await db.SaveChangesAsync();
 
         var generator = new RecordingCodeChangeGenerator(
-            new CodeChangeProposal("Should not be used.", [new("README.md", CodeFileOperations.Add, "x")]));
+            new CodeChangeProposal("Should not be used.", [new("README.md", CodeFileOperations.Add, "x"u8.ToArray())]));
         var service = new CodeChangeService(
             db,
             generator,
@@ -1232,7 +1320,7 @@ public sealed class FoundationTests
         await db.SaveChangesAsync();
 
         var generator = new RecordingCodeChangeGenerator(
-            new CodeChangeProposal("Should not be used.", [new("README.md", CodeFileOperations.Add, "x")]));
+            new CodeChangeProposal("Should not be used.", [new("README.md", CodeFileOperations.Add, "x"u8.ToArray())]));
         var service = new CodeChangeService(
             db,
             generator,
@@ -1253,7 +1341,6 @@ public sealed class FoundationTests
     }
 
     [TestMethod]
-    [DataRow("AzureOpenAI")]
     [DataRow("unknown")]
     public void UnsupportedModeIsRejected(string mode)
     {
@@ -1331,7 +1418,12 @@ public sealed class FoundationTests
                 "Add an export action.", ["Add a button."], [], ["Check keyboard access."], []),
             new DeveloperSkillAnalysis(
                 "developer-backend", "general", "api-analysis", "Backend analysis", 1,
-                "Add a bounded endpoint.", ["Add an export endpoint."], [], ["Verify authorization."], [])
+                "Add a bounded endpoint.", ["Add an export endpoint."], [], ["Verify authorization."], []),
+            new DeveloperSkillAnalysis(
+                "developer-qa", "general", "test-planning", "QA planning", 3,
+                "Plan export coverage.", ["Add unit tests and docs/qa-test-plan.md."], [],
+                ["QA-01 / AC-01: seed an invoice; export; expect matching CSV rows; automated."],
+                ["Confirm the test runner command."])
         };
 
         await new Planner(generator).CreateAsync(
@@ -1340,9 +1432,16 @@ public sealed class FoundationTests
 
         using var input = JsonDocument.Parse(generator.Input!);
         var serializedAnalyses = input.RootElement.GetProperty("specialistAnalyses");
-        Assert.AreEqual(2, serializedAnalyses.GetArrayLength());
+        Assert.AreEqual(3, serializedAnalyses.GetArrayLength());
         Assert.AreEqual("developer-ui", serializedAnalyses[0].GetProperty("roleId").GetString());
         Assert.AreEqual("developer-backend", serializedAnalyses[1].GetProperty("roleId").GetString());
+        var qa = serializedAnalyses[2];
+        Assert.AreEqual("developer-qa", qa.GetProperty("roleId").GetString());
+        Assert.AreEqual(3, qa.GetProperty("skillRevision").GetInt32());
+        Assert.AreEqual("Add unit tests and docs/qa-test-plan.md.",
+            qa.GetProperty("proposedChanges")[0].GetString());
+        Assert.Contains("QA-01 / AC-01", qa.GetProperty("verificationNeeds")[0].GetString()!);
+        Assert.AreEqual("Confirm the test runner command.", qa.GetProperty("openQuestions")[0].GetString());
     }
 
     [TestMethod]
@@ -1685,7 +1784,7 @@ public sealed class FoundationTests
                 var directory = Path.GetDirectoryName(path)
                     ?? throw new InvalidDataException("The test file path has no parent directory.");
                 Directory.CreateDirectory(directory);
-                await File.WriteAllTextAsync(path, file.Content!, cancellationToken);
+                await File.WriteAllBytesAsync(path, file.Content!, cancellationToken);
             }
             return result.Summary;
         }

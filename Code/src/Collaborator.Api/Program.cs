@@ -145,47 +145,6 @@ api.MapPost("/agent-skills/{roleId}/{domain}/{skillId}/revisions", (
     CollaboratorDb db, CancellationToken ct) =>
     CreateAgentSkillRevisionAsync(roleId, domain, skillId, request, db, ct));
 
-api.MapGet("/business-analysts/{analystId}/skills", async (
-    string analystId, CollaboratorDb db, CancellationToken ct) =>
-{
-    if (!InputRules.IsText(analystId, 128))
-    {
-        return Results.Problem(statusCode: 400, title: "A valid business analyst ID is required.");
-    }
-    var skills =
-        from skill in db.AgentSkills.AsNoTracking()
-        join revision in db.AgentSkillRevisions.AsNoTracking()
-            on new { skill.RoleId, skill.Domain, skill.SkillId, Revision = skill.ActiveRevision }
-            equals new { revision.RoleId, revision.Domain, revision.SkillId, revision.Revision }
-        where skill.RoleId == "business-analyst" && skill.Domain == "general"
-        orderby skill.SkillId
-        select new
-        {
-            AnalystId = analystId,
-            skill.SkillId,
-            revision.Name,
-            revision.Prompt,
-            Revision = skill.ActiveRevision,
-            skill.IsEnabled,
-            skill.UpdatedAt
-        };
-    return Results.Ok(await skills.ToListAsync(ct));
-});
-api.MapPut("/business-analysts/{analystId}/skills/{skillId}", async (
-    string analystId, string skillId, BusinessAnalystSkillConfiguration request,
-    CollaboratorDb db, CancellationToken ct) =>
-{
-    if (!InputRules.IsValidBusinessAnalystSkill(analystId, skillId, request, out var error))
-    {
-        return Results.Problem(statusCode: 400, title: error);
-    }
-    return await CreateAgentSkillRevisionAsync(
-        "business-analyst", "general", skillId,
-        new AgentSkillRevisionRequest(
-            request.Name, request.Prompt, request.IsEnabled,
-            "Updated via the legacy business analyst skill endpoint", analystId),
-        db, ct);
-});
 api.MapPost("/products", async (ProductRegistration request, CollaboratorDb db, CancellationToken ct) =>
 {
     if (!InputRules.IsProductId(request.Id) || !InputRules.IsText(request.Name, 200) ||
@@ -278,11 +237,13 @@ api.MapPost("/products/{id}/feature-requests", async (
         return Results.NotFound();
     }
     var text = request.Text.Trim();
+    var selectionJson = request.DeveloperSkills is null ? null : JsonSerializer.Serialize(
+        DeveloperSkillSelectionPolicy.Normalize(request.DeveloperSkills), JsonSerializerOptions.Web);
     var existing = await db.Runs.AsNoTracking().SingleOrDefaultAsync(
         x => x.ProductId == id && x.IdempotencyKey == key, ct);
     if (existing is not null)
     {
-        return SubmissionResult(existing, text, analystId, skillId, request.ReviewerCount);
+        return SubmissionResult(existing, text, analystId, skillId, request.ReviewerCount, selectionJson);
     }
     var skill = await db.AgentSkills.AsNoTracking().SingleOrDefaultAsync(
         x => x.RoleId == "business-analyst" && x.Domain == "general" &&
@@ -324,10 +285,10 @@ api.MapPost("/products/{id}/feature-requests", async (
                    revision.Name,
                    revision.Prompt))
             .ToArrayAsync(ct);
-    if (developerSkills.Length == 0)
+    if (!DeveloperSkillSelectionPolicy.TryResolve(
+        developerSkills, request.DeveloperSkills, out var selectedSkills, out var selectionError))
     {
-        return Results.Problem(statusCode: 409,
-            title: "Configure at least one enabled developer-* skill before submitting a feature request.");
+        return Results.Problem(statusCode: 409, title: selectionError);
     }
     if (!InputRules.IsRepositoryUrl(product.RepositoryUrl) ||
         !InputRules.IsRepositoryBaseBranch(product.RepositoryBaseBranch))
@@ -345,7 +306,8 @@ api.MapPost("/products/{id}/feature-requests", async (
         BusinessAnalystSkillName = skillRevision.Name,
         BusinessAnalystSkillRevision = skillRevision.Revision,
         BusinessAnalystPrompt = skillRevision.Prompt,
-        DeveloperSkillsJson = JsonSerializer.Serialize(developerSkills, JsonSerializerOptions.Web),
+        DeveloperSkillsJson = JsonSerializer.Serialize(selectedSkills, JsonSerializerOptions.Web),
+        DeveloperSkillSelectionJson = selectionJson,
         ReviewerCount = request.ReviewerCount,
         BusinessAnalystApproved = false
     };
@@ -361,9 +323,9 @@ api.MapPost("/products/{id}/feature-requests", async (
         db.ChangeTracker.Clear();
         var winner = await db.Runs.AsNoTracking().SingleAsync(
             x => x.ProductId == id && x.IdempotencyKey == key, ct);
-        return SubmissionResult(winner, text, analystId, skillId, request.ReviewerCount);
+        return SubmissionResult(winner, text, analystId, skillId, request.ReviewerCount, selectionJson);
     }
-    return SubmissionResult(run, text, analystId, skillId, request.ReviewerCount);
+    return SubmissionResult(run, text, analystId, skillId, request.ReviewerCount, selectionJson);
 });
 api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, CancellationToken ct) =>
 {
@@ -392,6 +354,8 @@ api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, CancellationTok
         architectureRevision,
         developerSkillCount = JsonSerializer.Deserialize<DeveloperSkillSnapshot[]>(
             run.DeveloperSkillsJson, JsonSerializerOptions.Web)?.Length ?? 0,
+        developerSkills = JsonSerializer.Deserialize<DeveloperSkillSnapshot[]>(
+            run.DeveloperSkillsJson, JsonSerializerOptions.Web)?.Select(snapshot => snapshot.Skill),
         run.PlanRevision, run.Decision, run.DecisionComment, run.FailureCode,
         run.RepositoryCommit, run.RepositoryUrl, run.RepositoryBaseBranch,
         repositoryCatalog = run.RepositoryCatalogJson is null
@@ -681,7 +645,7 @@ api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, CancellationTok
         .WithName("GetRunCollaboration")
         .WithSummary("Get cross-role collaboration synthesis for a feature run")
         .WithDescription(
-            "Returns source-linked agreements, conflicts, and open questions from the captured developer skill analyses. The synthesis is advisory and may be empty while processing or for legacy runs.")
+            "Returns source-linked agreements, conflicts, and open questions from the captured developer skill analyses. The synthesis is advisory and may be empty while processing.")
         .Produces<CollaborationSynthesisArtifactResponse[]>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status404NotFound);
 api.MapGet("/runs/{id:guid}/events", async (
@@ -869,13 +833,15 @@ api.MapPost("/runs/{id:guid}/plan-decisions", async (
 });
 app.Run();
 
-static IResult SubmissionResult(FeatureRun run, string text, string analystId, string skillId, int reviewerCount) =>
+static IResult SubmissionResult(
+    FeatureRun run, string text, string analystId, string skillId, int reviewerCount, string? selectionJson) =>
     run.Text != text || run.BusinessAnalystId != analystId ||
-    run.BusinessAnalystSkillId != skillId || run.ReviewerCount != reviewerCount
+    run.BusinessAnalystSkillId != skillId || run.ReviewerCount != reviewerCount ||
+    run.DeveloperSkillSelectionJson != selectionJson
         ? Results.Problem(statusCode: 409, title: "Idempotency key was already used with different request details.")
         : Results.Accepted($"/api/v1/runs/{run.Id}", new
         {
-            featureRequestId = run.Id, runId = run.Id, run.Status,
+            runId = run.Id, run.Status,
             statusUrl = $"/api/v1/runs/{run.Id}"
         });
 

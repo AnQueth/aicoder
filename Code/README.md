@@ -29,7 +29,7 @@ dotnet test tests\Collaborator.Tests\Collaborator.Tests.csproj --filter 'TestCat
 ```
 
 Both Aspire CLI 13.6.0 and EF tooling are pinned in `dotnet-tools.json`. Use the local
-CLI commands below rather than an older globally installed Aspire CLI.
+CLI commands below to use the repository's pinned versions.
 
 ## One-time local secrets
 
@@ -83,12 +83,10 @@ The AppHost launches:
 | REST API | User-facing intake, polling, events, and decisions |
 | Aspire dashboard | Local resource status, logs, and telemetry |
 
-The EF migration history starts from a fresh `InitialCreate` baseline, followed by
-the additive `RepositoryBaseBranch` migration for product and run configuration.
-It intentionally does not upgrade databases created by the earlier migration
-chain. The AppHost uses a new named PostgreSQL volume for this baseline and leaves
-the earlier development volume untouched. Existing data from that volume is not
-visible to this version.
+The EF migration history starts from `InitialCreate`, followed by
+`RepositoryBaseBranch` for source configuration and `PerRunSpecialistSelection`
+for per-run specialist selection and idempotency.
+The AppHost stores application data in `collaborator-postgres-data-v2`.
 
 PostgreSQL and Azurite use named persistent volumes. Normal stop/start preserves
 approval waits. Do not delete those volumes to restart. Fixed local project ports
@@ -128,8 +126,7 @@ configuration (`Agents:Mode` / `Agents__Mode`); the model can be set with
 `Agents:Copilot:Model` / `Agents__Copilot__Model`. If unset, the Copilot runtime
 selects its default model.
 
-Restart the AppHost after configuration changes. `AzureOpenAI` mode is no
-longer supported.
+Restart the AppHost after configuration changes.
 
 Each activity creates a fresh Copilot session. Before the BA draft, the workflow
 downloads the configured Git source with a shallow fetch without checking files
@@ -149,8 +146,9 @@ stage alone receives all Copilot SDK built-in tools and read-only repository
 search tools; analysis and planning stages do not receive SDK built-ins. Changes
 are made directly on disk in the feature worktree, then collected from Git and
 validated before the workflow prepares and publishes the review branch. The
-source/default branch is not changed. Secret-like paths, generated directories,
-known binary files, and oversized patches are rejected. The worktree is only a
+source/default branch is not changed. File names, types, counts, and content
+sizes are unrestricted; repository-relative path, Git metadata, operation, and
+regular-file checks still apply. The worktree is only a
 starting directory, not an OS sandbox: approved SDK tools such as shell
 commands can access other resources available to the service identity.
 Catalogs are cached per product commit and pinned to each feature run; plan
@@ -159,8 +157,10 @@ indexed for a new run. Planning revisions include the prior plan and feedback.
 Configuration discovery and embedding retrieval are disabled. Analysis, planning,
 cataloging, and reviewer-selection sessions have a three-minute deadline;
 implementation has a ten-minute deadline. Each requests an explicit JSON schema
-for its stage-specific output. The implementer returns only a summary; file
-changes are collected from Git, not returned as a JSON patch. Application
+for its stage-specific output. The implementer returns a summary and an explicit
+`complete` flag; progress-only responses continue in the same session under the
+same ten-minute deadline. Invalid completion responses fail rather than publish.
+File changes are collected from Git, not returned as a JSON patch. Application
 validators check the artifacts and changes before persistence/publication.
 Schema descriptions explain bounds because model providers support only a subset
 of JSON Schema constraints. The SDK's structured-output and permission-decision APIs
@@ -260,15 +260,18 @@ not files proven to have been read by the model. Catalog and architecture path
 validation checks membership in that snapshot; it does not prove every cited file
 was opened or independently verify semantic claims.
 
-Published changes have stricter rules than source reads: at most 32 changed files,
-24,000 characters per added/updated file, and 160,000 characters of combined
-added/updated content. Paths must be relative, at most 240 characters, and contain
-no dot-prefixed segments. Allowed extensions are `.cs`, `.csproj`, `.css`, `.go`,
-`.html`, `.java`, `.js`, `.jsx`, `.md`, `.py`, `.rs`, `.sql`, `.ts`, and `.tsx`.
-The workflow also rejects ineligible source paths, symlink/type changes, binary
-content, and excluded generated or secret-like files. SDK built-ins are not
-limited by these path filters while running; validation applies to the collected
-patch before publication.
+Published changes can include any repository file type or name: configuration,
+dotfiles, lock files, extensionless files, and binary assets are supported.
+There are no application-imposed per-file size, total content, file-count, or
+path-length caps. Patches preserve file bytes exactly and persist content as
+base64 in JSON. Collection includes tracked changes and untracked files not
+ignored by Git; ignored files must be explicitly staged to include them.
+Repository-relative path validation, Git metadata protection, and regular-file
+checks still reject traversal, symlink escapes, and file-type changes. Actual
+credentials and secrets must never be committed. Read-only AI source tools keep
+their separate inspection filters described above; these do not restrict which
+files the implementer can change. Memory, storage, Git, OS, model-context, and
+execution-time constraints still apply.
 The sample is intentionally not part of `Collaborator.slnx` or AppHost, so
 repository tools can operate on it as an independent Git target. From the
 `aicoder` VS Code workspace, use **Sample Product: Taskboard (F5)** to build and
@@ -292,8 +295,6 @@ call it directly. `/health` and `/alive` are local readiness/liveness endpoints.
 | GET | `/api/v1/agent-skills?roleIdPrefix=developer-` | List all active developer-role skills |
 | GET | `/api/v1/agent-skills/{roleId}/{domain}/{skillId}/revisions` | List immutable skill revisions, newest first |
 | POST | `/api/v1/agent-skills/{roleId}/{domain}/{skillId}/revisions` | Append a revision with `{ "name": "...", "prompt": "...", "isEnabled": true, "changeReason": "...", "actorId": "..." }`; advances the active revision |
-| GET | `/api/v1/business-analysts/{analystId}/skills` | Legacy alias listing shared business-analyst skills in the `general` domain |
-| PUT | `/api/v1/business-analysts/{analystId}/skills/{skillId}` | Legacy alias that appends a revision to the shared `business-analyst/general` skill |
 | POST | `/api/v1/products/{id}/feature-requests` | `{ "text": "...", "businessAnalystId": "default", "businessAnalystSkillId": "requirements-analysis" }` plus `Idempotency-Key`; 202 with run ID and status URL |
 | GET | `/api/v1/runs/{id}` | Status, BA specification/revision/decision, architecture revision, captured developer-skill count, plan/revision/decision, failure code, snapshotted repository URL/base branch, pinned commit, and review-branch metadata |
 | GET | `/api/v1/runs/{id}/feature-specifications` | Every formal specification revision, decision, feedback, and question-answer set |
@@ -311,11 +312,11 @@ call it directly. `/health` and `/alive` are local readiness/liveness endpoints.
 | GET | `/openapi/v1.json` | Machine-readable REST description |
 
 Skill revisions are append-only. The active pointer and enabled state are updated
-when a revision is added; disabling a skill also creates a new revision. The legacy
-BA routes address the shared `business-analyst/general` skills, not analyst-specific
-copies. New databases start with an empty skill registry; configure a business
-analyst skill through the generic agent-skill API before submitting runs. Existing
-databases are not upgraded from the earlier schema. Supplied `actorId` values are
+when a revision is added; disabling a skill also creates a new revision.
+All roles use the shared agent-skill API. BA skills use role `business-analyst`
+and domain `general`; `businessAnalystId` is an actor label, not a skill namespace.
+New databases start with an empty skill registry; configure a business
+analyst skill through the agent-skill API before submitting runs. Supplied `actorId` values are
 audit labels only and are not authenticated identities.
 
 Developer skills use role IDs beginning with `developer-`, for example
@@ -336,8 +337,8 @@ Invoke-RestMethod -Method Post `
   -Headers $headers -ContentType 'application/json' -Body ($skill | ConvertTo-Json)
 ```
 
-All enabled `developer-*` skills are snapshotted, including their prompts and
-revision numbers, when a feature run is submitted. After architecture approval,
+Each run snapshots its selected `developer-*` skills, including user-defined
+prompts and active revision numbers, when submitted. After architecture approval,
 canonical Durable workflow runs a separate bounded activity for each captured
 skill and persists each result with its skill revision and repository commit. A
 final aggregation step verifies that every captured role has exactly one result
@@ -349,13 +350,53 @@ receives both the complete original analyses and synthesis. The API and console 
 alongside the individual results before plan approval. Review all outputs: the
 workflow does not select only roles it thinks are relevant, and the synthesis
 must not silently settle disagreements. Adding or editing a role later affects
-new runs, not runs already submitted. Feature submission returns 409 if no
-enabled developer skill is configured. The console client initializes a general
-developer skill only when none are configured.
+new runs, not runs already submitted. Specialist selection is separate from
+human reviewer selection; BA, architecture, and plan approvals remain required.
 
-This is a new product and does not support replaying Durable histories created by
-older workflow implementations. Before deploying a workflow change, ensure there
-are no active instances that depend on the previous implementation.
+### Per-run specialist selection and user-defined prompts
+
+The feature submission's optional `developerSkills` array controls selection:
+
+- Omitted or `null`: capture all enabled developer skills. An empty registry
+  means no specialist analyses.
+- A nonempty list: capture only those exact role/domain/skill keys. Missing,
+  disabled, or revisionless selections return 409; malformed/duplicate keys
+  return 400.
+- `[]`: capture none, record an empty specialist result bundle, and skip the
+  model synthesis. Planning still uses approved requirements and architecture.
+
+```json
+{
+  "text": "Add invoice export",
+  "reviewerCount": 1,
+  "developerSkills": [
+    { "roleId": "developer-qa", "domain": "general", "skillId": "test-planning" }
+  ]
+}
+```
+
+The CLI equivalent is repeatable
+`--specialist developer-qa/general/test-planning`. Use `--no-specialists` for an
+empty list; omit both flags for registry defaults. These flags cannot be combined
+or used to change a run when attaching with `--run`.
+
+Users define specialist prompts through the shared revision API. The console
+does not create or replace specialist prompts. For example, a user may configure
+`developer-qa/general/test-planning` to require unit-test creation and a QA plan
+with test IDs, acceptance-criteria mapping, setup/data, actions, expected results,
+and manual/automated classification. Those requirements belong in that editable
+prompt, not in hardcoded QA rules. Selecting a role name alone does not prescribe
+its expertise or deliverables. Generic agent definitions retain output-format,
+read-only planning, and safety boundaries.
+
+Selection order does not affect idempotency, but changing between default,
+explicit, or empty selection with the same idempotency key returns 409.
+Runs retain captured prompts/revisions when the registry changes. Run retrieval
+includes the captured `developerSkills` references and count. Neither specialist
+analysis nor generated test plans establish executed tests or QA/UAT sign-off.
+
+Deploy the API, worker, client, and scripts together as one current contract.
+Before changing the orchestration, finish active instances that depend on it.
 
 Each new run snapshots the selected BA skill name, revision, and prompt, so later
 skill edits do not alter work already in progress. The BA agent creates a structured
@@ -451,7 +492,9 @@ requests each receive `ApproveOnce` without an additional human prompt. Git chan
 are collected from the worktree and validated before the workflow publishes the unique
 `collaborator/feature-{runId}` review branch. Run status reports the branch name,
 commit, changed paths, and patch summary; patch contents are not exposed by the
-API. SDK built-ins can run shell commands or access resources available to the
+API. File names, extensions, counts, and content sizes are not restricted by
+application policy; text and binary contents are preserved.
+SDK built-ins can run shell commands or access resources available to the
 service identity, so the worktree is not an OS security sandbox. No merge or
 deployment is performed automatically. Rejecting a plan does not invoke code
 generation.
@@ -528,8 +571,15 @@ dotnet run --project src\Collaborator.ApiClient -- --feature "Add invoice export
   --review-response "alice=approve" --review-response "bob=approve" --review-response "cara=approve" `
   --feedback "Include CSV and PDF formats and add a large-export test" --approve
 
-# Non-interactive approve of the first plan; or resume an existing run
-dotnet run --project src\Collaborator.ApiClient -- --auto
+# Non-interactive smoke run: provide a feature, source, and explicit reviewer responses
+dotnet run --project src\Collaborator.ApiClient -- --auto `
+  --repository-url $env:COLLABORATOR_PRODUCT_REPOSITORY_URL `
+  --feature "Add a clear-completed action with confirmation to the Taskboard UI" `
+  --reviewer-count 1 `
+  --developer "taskboard-reviewer|Taskboard Reviewer|frontend,testing|Browser-local storage and UI regression coverage" `
+  --review-response "taskboard-reviewer=approve" --timeout 900
+
+# Resume an existing run interactively
 dotnet run --project src\Collaborator.ApiClient -- --run <run-guid>
 ```
 

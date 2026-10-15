@@ -30,6 +30,11 @@ original analyses visible as evidence. When `collaborationSynthesis` is supplied
 use it as a comparison aid, not as a replacement for those analyses. Carry relevant
 conflicts and unresolved questions into the plan's `openQuestions`; do not silently
 choose a side or turn an unresolved decision into an implementation assumption.
+Carry relevant deliverables from the selected specialists into implementation
+and verification steps, preserving evidence and unresolved questions. Specialist
+expertise comes from user-defined skill prompts, not hardcoded role policies.
+If no specialists were selected, plan from the approved specification and
+architecture without inventing specialist findings or a synthesis.
 Do not include credentials or personal data. This draft requires human review
 and is not authorization to implement or deploy.
 

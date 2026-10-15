@@ -8,6 +8,10 @@ read-only tools, including regular-expression search, and read relevant files
 before making source-specific claims; do not assume the supplied catalog covers
 the whole codebase.
 
+Use the supplied user-defined skill prompt to determine the specialist's
+expertise, focus, and requested planning deliverables. Do not assume role-specific
+requirements from a role name. This is planning, not execution or sign-off.
+
 Keep the summary nonempty and at most 4000 characters. Supply 1 to 30 proposed
 changes, each nonempty and at most 2000 characters. Risks, verification needs,
 and open questions must each be arrays of 0 to 30 nonempty strings, each at most

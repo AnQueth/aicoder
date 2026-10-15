@@ -12,10 +12,8 @@ public sealed record FeatureSubmission(
     string Text,
     string BusinessAnalystId = "default",
     string BusinessAnalystSkillId = "requirements-analysis",
-    int ReviewerCount = 3);
-
-/// <summary>A versioned business-analysis skill prompt owned by one analyst.</summary>
-public sealed record BusinessAnalystSkillConfiguration(string Name, string Prompt, bool IsEnabled = true);
+    int ReviewerCount = 3,
+    DeveloperSkillSelection[]? DeveloperSkills = null);
 
 /// <summary>A new human-authored revision of a skill used by one AI role and optional domain.</summary>
 public sealed record AgentSkillRevisionRequest(
@@ -119,9 +117,9 @@ public sealed record RepositoryCatalog(
 }
 
 /// <summary>A requested add, update, or delete in the proposed implementation patch.</summary>
-public sealed record CodeFileChange(string Path, string Operation, string? Content);
+public sealed record CodeFileChange(string Path, string Operation, byte[]? Content);
 
-/// <summary>A bounded implementation patch generated for an approved plan.</summary>
+/// <summary>An implementation patch generated for an approved plan.</summary>
 public sealed record CodeChangeProposal(string Summary, CodeFileChange[] Files);
 
 /// <summary>Review metadata for the implementation branch; patch contents remain private.</summary>
@@ -367,15 +365,6 @@ public static class InputRules
     /// <summary>Maximum accepted rejection reason or revision feedback length.</summary>
     public const int MaximumCommentLength = 4_000;
 
-    /// <summary>Maximum characters in one generated implementation file.</summary>
-    public const int MaximumCodeChangeFileLength = 24_000;
-
-    /// <summary>Maximum files in one generated implementation patch.</summary>
-    public const int MaximumCodeChangeFiles = 32;
-
-    /// <summary>Maximum characters in the complete generated implementation patch.</summary>
-    public const int MaximumCodeChangeContentLength = 160_000;
-
     /// <summary>Bounds orchestration history; further changes require a new feature request.</summary>
     public const int MaximumPlanRevisions = 5;
 
@@ -574,22 +563,6 @@ public static class InputRules
         return true;
     }
 
-    /// <summary>Validates an analyst skill identifier and its editable prompt.</summary>
-    public static bool IsValidBusinessAnalystSkill(
-        string? analystId, string? skillId, BusinessAnalystSkillConfiguration? skill, out string error)
-    {
-        error = string.Empty;
-        if (!IsText(analystId, 128) || !IsProductId(skillId) || skill is null ||
-            !IsText(skill.Name, 200) ||
-            !IsText(skill.Prompt, MaximumBusinessAnalystSkillPromptLength))
-        {
-            error = $"Analyst ID, lowercase skill ID, name, and a prompt of at most {MaximumBusinessAnalystSkillPromptLength} characters are required.";
-            return false;
-        }
-
-        return true;
-    }
-
     /// <summary>Validates the identifiers and content for a new immutable skill revision.</summary>
     public static bool IsValidAgentSkillRevision(
         string? roleId, string? domain, string? skillId,
@@ -634,6 +607,16 @@ public static class InputRules
             !IsValidReviewerCount(submission.ReviewerCount))
         {
             error = $"Feature text, valid analyst and skill IDs, and a reviewer count from 1 to {MaximumReviewerCount} are required.";
+            return false;
+        }
+        if (submission.DeveloperSkills is { } selections &&
+            (selections.Any(selection => selection is null ||
+                !IsProductId(selection.RoleId) ||
+                !selection.RoleId.StartsWith("developer-", StringComparison.Ordinal) ||
+                !IsProductId(selection.Domain) || !IsProductId(selection.SkillId)) ||
+             selections.Distinct().Count() != selections.Length))
+        {
+            error = "Developer skills must contain distinct developer-role, domain, and skill IDs.";
             return false;
         }
 
@@ -716,7 +699,7 @@ public static class InputRules
 
     /// <summary>
     /// Validates generated paths and operations against the exact pinned Git tree.
-    /// Only regular source/documentation files may be written to the Git index.
+    /// Only regular files inside the repository may be written to the Git index.
     /// </summary>
     public static void ValidateCodeChange(
         CodeChangeProposal proposal, IReadOnlyDictionary<string, string> trackedFileModes)
@@ -724,13 +707,12 @@ public static class InputRules
         ArgumentNullException.ThrowIfNull(proposal);
         ArgumentNullException.ThrowIfNull(trackedFileModes);
         if (!IsText(proposal.Summary, 2_000) ||
-            proposal.Files is not { Length: > 0 and <= MaximumCodeChangeFiles })
+            proposal.Files is not { Length: > 0 })
         {
             throw new InvalidDataException("The implementation patch must include a bounded summary and at least one file change.");
         }
 
         var changedPaths = new HashSet<string>(StringComparer.Ordinal);
-        var totalLength = 0;
         foreach (var file in proposal.Files)
         {
             if (file is null || !IsSafeCodeChangePath(file.Path) || !changedPaths.Add(file.Path))
@@ -747,15 +729,9 @@ public static class InputRules
                 case CodeFileOperations.Update or CodeFileOperations.Delete when !tracked || !regularFile:
                     throw new InvalidDataException($"The implementation patch can only update or delete tracked regular file '{file.Path}'.");
                 case CodeFileOperations.Add or CodeFileOperations.Update:
-                    if (file.Content is null || file.Content.Contains('\0'))
+                    if (file.Content is null)
                     {
-                        throw new InvalidDataException($"The implementation patch must provide text content for '{file.Path}'.");
-                    }
-                    totalLength += file.Content.Length;
-                    if (file.Content.Length > MaximumCodeChangeFileLength ||
-                        totalLength > MaximumCodeChangeContentLength)
-                    {
-                        throw new InvalidDataException("The implementation patch exceeds its file or total content limit.");
+                        throw new InvalidDataException($"The implementation patch must provide content for '{file.Path}'.");
                     }
                     break;
                 case CodeFileOperations.Delete when file.Content is not null:
@@ -768,9 +744,10 @@ public static class InputRules
         }
     }
 
-    private static bool IsSafeCodeChangePath(string? path)
+    /// <summary>Checks repository-relative paths without filtering file names or extensions.</summary>
+    public static bool IsSafeCodeChangePath(string? path)
     {
-        if (path is not { Length: > 0 and <= 240 } ||
+        if (string.IsNullOrEmpty(path) ||
             path.StartsWith('/') ||
             path.Contains('\\') ||
             path.Any(char.IsControl))
@@ -782,29 +759,13 @@ public static class InputRules
         if (segments.Any(segment =>
                 segment.Length == 0 ||
                 segment is "." or ".." ||
-                segment.StartsWith('.') ||
-                segment.Contains(':')) ||
-            segments.Any(segment => segment.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
-                segment.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
-                segment.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
-                segment.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
-                segment.Equals("vendor", StringComparison.OrdinalIgnoreCase)))
+                segment.Contains(':') ||
+                segment.TrimEnd(' ', '.').Equals(".git", StringComparison.OrdinalIgnoreCase)))
         {
             return false;
         }
 
-        var name = segments[^1];
-        if (name.StartsWith(".env", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
-            name.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) ||
-            name.EndsWith(".lock", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return Path.GetExtension(name).ToLowerInvariant() is
-            ".cs" or ".csproj" or ".css" or ".go" or ".html" or ".java" or ".js" or ".jsx" or
-            ".md" or ".py" or ".rs" or ".sql" or ".ts" or ".tsx";
+        return true;
     }
 
     /// <summary>Rejects incomplete model results rather than treating them as success.</summary>

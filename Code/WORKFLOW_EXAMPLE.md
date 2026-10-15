@@ -63,7 +63,7 @@ AI code generation:
   in the worktree; the source/default branch is not modified.
 
 Test client/workflow:
-  Collects the changed files from Git and validates paths and size limits, then
+  Collects changed file bytes from Git and validates repository confinement, then
   publishes the review branch. A human reviews it; the workflow does not merge.
 
 Note: the worktree is a starting directory, not an OS sandbox. SDK tools such as

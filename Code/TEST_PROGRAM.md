@@ -23,6 +23,49 @@ published review commit's parent remains the pinned commit. They exercise HTTPS
 and SSH URL handling using process-scoped Git URL rewriting to local fixtures;
 they do not contact a hosted service or test real network authentication.
 
+### Per-run specialist selection verification
+
+On 2026-10-15, 34 focused tests passed covering selection, prompt/revision
+preservation, CLI and request payloads, planner context, and Git review-branch
+publication, including an empty specialist set. After adding an explicit
+no-synthesis-model assertion, all 17 selection tests passed again.
+The empty-set case also verifies that human plan/reviewer approval is still
+required. The API built without warnings or errors, the EF model matched its
+migration, and the smoke script passed PowerShell syntax validation.
+The generated Functions extension build reported an NU1900 warning because
+package vulnerability metadata access was denied.
+
+These are local tests, not a live Copilot rerun. The additive
+`PerRunSpecialistSelection` migration was generated but not applied to the live
+database during this verification.
+
+### Live six-number calculator feature
+
+On 2026-10-15, the updated Aspire stack applied the migration and the real
+scripted API client submitted a fresh calculator request with `--no-specialists`.
+Run `36179833-2e7a-4100-8ee4-01286755b874` reached `code_change_ready` in 601.6
+seconds, with 1,190 HTTP requests and zero non-2xx responses. BA, architecture,
+reviewer, and plan approvals were submitted automatically for the demonstration;
+they were not independent human sign-off.
+
+The API confirmed `developerSkillCount: 0` and `developerSkills: []`.
+The generated review branch was
+`collaborator/feature-361798332e7a41008ee401286755b874`, commit
+`697b41c313eecbd3f17b4af90dc30b7f9208cd90`. Its parent and unchanged `main`
+were both `da420a5846bbca95e4be5b7d9eb7a6f00387536d`; nothing was merged.
+
+Independent verification of that exact published commit:
+
+- `node --test`: 10 passed, zero failed.
+- `dotnet build --disable-build-servers --verbosity minimal`: zero warnings/errors.
+- Edge browser checks: six positive integers produced 21; mixed signs produced
+  0; decimals produced 18; six zeros produced 0; blank input displayed an error.
+- Existing task add, completion, filtering, local-storage reload, and deletion
+  passed browser regression checks. No browser JavaScript errors were observed.
+
+The generated changes include the reusable calculator, six-input accessible UI,
+automated tests, and a manual QA plan in the sample repository's README.
+
 ### Live Copilot test
 
 `CopilotUsesRepositoryToolsToGroundAndRevisePlan` is tagged `LiveCopilot`.
@@ -47,8 +90,9 @@ The script checks:
 
 - The API is ready and rejects a request without an API key.
 - Business analyst, architect, and developer skills, reviewers, and a synthetic
-  product can be configured. The script reuses its stable `developer-smoke` skill
-  and disables temporary smoke skills created by earlier script versions.
+  product can be configured through the shared agent-skill API. The script reuses
+  and explicitly selects its stable `developer-smoke` fixture skill, without
+  modifying other user-defined specialist prompts.
 - The architecture skill is available, and the generated architecture analysis
   can be reviewed and approved.
 - Invalid feature input is rejected.
@@ -118,3 +162,22 @@ transcript does not include the internal model prompts or tool messages used
 inside the workflow; it records the test program's HTTP inputs and the
 application's HTTP outputs. The generated directory is ignored by Git because
 reports may contain product or repository details.
+
+## Automatic client verification
+
+On 2026-10-15, the live `--auto` client completed the Taskboard clear-completed
+feature flow using Copilot, the local Aspire stack, one configured reviewer, and
+an explicit scripted approval response. Run
+`3d18e692-1fa7-41d6-8ee1-b5db07d7c364` reached `code_change_ready` with client exit
+code 0 in 550.9 seconds. The sample remote retained review branch
+`collaborator/feature-3d18e6921fa741d68ee1b5db07d7c364` at commit
+`5fd233d651b74897b492cf2c73d4596fd31409a1`. Its parent matched the pinned base
+`da420a5846bbca95e4be5b7d9eb7a6f00387536d`, and `main` was unchanged.
+The verification stack was stopped afterward.
+
+The associated focused regression run passed 34 tests, including binary-byte
+preservation through persisted patches and Git publication, configuration and
+dotfile changes, and validation beyond the removed file-count/content caps.
+These checks verify the client/workflow and file policy, not independent QA or
+UAT approval of the generated feature. Scripted approvals are development-only
+test inputs.

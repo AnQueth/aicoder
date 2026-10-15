@@ -359,6 +359,11 @@ public sealed class FeatureWorkflow(
             ?? throw new InvalidOperationException(
                 "Cross-role synthesis requires completed analyses from every captured developer skill.");
         var snapshots = await store.GetDeveloperSkillSnapshotsAsync(runId, cancellationToken);
+        if (snapshots.Length == 0)
+        {
+            logger.LogInformation("Skipping cross-role synthesis for run {RunId}: no specialists selected.", runId);
+            return;
+        }
         await using var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
         var synthesis = await developerCollaborator.SynthesizeAsync(
             analyses,
@@ -414,9 +419,12 @@ public sealed class FeatureWorkflow(
             request.RunId, cancellationToken)
             ?? throw new InvalidOperationException(
                 "Developer planning requires completed analysis from every captured developer skill.");
-        var collaborationSynthesis = await store.GetCollaborationSynthesisAsync(request.RunId, cancellationToken)
-            ?? throw new InvalidOperationException(
+        var collaborationSynthesis = await store.GetCollaborationSynthesisAsync(request.RunId, cancellationToken);
+        if (specialistAnalyses.Length > 0 && collaborationSynthesis is null)
+        {
+            throw new InvalidOperationException(
                 "Collaborative planning requires a completed, source-linked cross-role synthesis.");
+        }
         var reviewerMatches = await store.GetSelectedReviewersAsync(request.RunId, cancellationToken);
         if (reviewerMatches is null)
         {

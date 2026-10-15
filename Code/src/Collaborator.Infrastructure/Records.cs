@@ -37,6 +37,7 @@ public sealed class FeatureRun
     public int ReviewerCount { get; set; } = 3;
     public string? SelectedReviewersJson { get; set; }
     public string DeveloperSkillsJson { get; set; } = "[]";
+    public string? DeveloperSkillSelectionJson { get; set; }
     public string Status { get; set; } = "queued";
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? PlanJson { get; set; }

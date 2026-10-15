@@ -260,9 +260,13 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
         {
           "type": "object",
           "properties": {
-            "summary": { "type": "string" }
+            "summary": { "type": "string", "minLength": 1 },
+            "complete": {
+              "type": "boolean",
+              "description": "True only after every approved implementation deliverable is finished. Progress check-ins must be false."
+            }
           },
-          "required": ["summary"],
+          "required": ["summary", "complete"],
           "additionalProperties": false
         }
         """);
@@ -820,19 +824,19 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
         try
         {
 #pragma warning disable GHCP001 // Structured output is experimental in SDK 1.0.16.
-            var response = await session.SendAndWaitAsync(new MessageOptions
+            return await CompleteImplementationAsync(repositoryContext.Prompt, async (prompt, token) =>
             {
-                Prompt = repositoryContext.Prompt,
-                ResponseSchema = CodeChangeSummarySchema
-            }, timeout: timeout, cancellationToken: deadline.Token);
+                var response = await session.SendAndWaitAsync(new MessageOptions
+                {
+                    Prompt = prompt,
+                    ResponseSchema = CodeChangeSummarySchema
+                }, timeout: timeout, cancellationToken: token);
+                return response?.Data.Content
+                    ?? throw new InvalidDataException("Copilot returned no implementation summary.");
+            }, summary => logger.LogInformation("Copilot implementation progress: {Summary}", summary), deadline.Token);
 #pragma warning restore GHCP001
-            using var document = JsonDocument.Parse(
-                response?.Data.Content ?? throw new InvalidDataException("Copilot returned no implementation summary."));
-            var summary = document.RootElement.GetProperty("summary").GetString()
-                ?? throw new InvalidDataException("Copilot returned an empty implementation summary.");
-            logger.LogInformation("Copilot code-generation session completed.");
-            return summary;
         }
+
         catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
         {
             logger.LogWarning("Copilot code generation was cancelled or timed out; aborting the session.");
@@ -845,6 +849,36 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
                 logger.LogError(abortError, "Copilot session abort failed after cancellation or timeout.");
             }
             throw;
+        }
+    }
+
+    internal static async Task<string> CompleteImplementationAsync(
+        string prompt, Func<string, CancellationToken, Task<string>> send,
+        Action<string> reportProgress, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var document = JsonDocument.Parse(await send(prompt, cancellationToken));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("summary", out var summaryElement) ||
+                summaryElement.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(summaryElement.GetString()) ||
+                !root.TryGetProperty("complete", out var completeElement) ||
+                completeElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                throw new InvalidDataException("Copilot must return a nonempty summary and an explicit completion flag.");
+            }
+            var summary = summaryElement.GetString()!;
+            if (completeElement.GetBoolean())
+            {
+                return summary;
+            }
+            reportProgress(summary);
+            prompt = "Continue implementing the same approved plan in this worktree. Your last response was " +
+                "a progress update, not completion. Finish every remaining approved deliverable and run " +
+                "the relevant tests before returning complete:true. If still working, return complete:false. " +
+                "Do not treat dependency setup alone as a finished feature.";
         }
     }
 

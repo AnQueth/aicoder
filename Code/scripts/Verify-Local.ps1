@@ -229,18 +229,10 @@ try {
     $skillPrompt = 'Clarify user outcomes, observable acceptance criteria, constraints, out-of-scope items, and unresolved questions.'
     $developerSkills = Invoke-Api '/api/v1/agent-skills?roleIdPrefix=developer-'
     Assert-Status $developerSkills 200 'Developer skill listing'
-    foreach ($oldSmokeSkill in @($developerSkills.Content | ConvertFrom-Json) |
-            Where-Object { $_.roleId -match '^developer-smoke-[0-9a-f]{32}$' -and $_.isEnabled }) {
-        Assert-Status (Invoke-Api "/api/v1/agent-skills/$($oldSmokeSkill.roleId)/$($oldSmokeSkill.domain)/$($oldSmokeSkill.skillId)/revisions" 'POST' @{
-            name = $oldSmokeSkill.name
-            prompt = $oldSmokeSkill.prompt
-            isEnabled = $false
-            changeReason = 'Disabled a temporary role from an earlier local smoke run.'
-        }) 201 "Disable prior smoke skill $($oldSmokeSkill.roleId)"
-    }
-    Assert-Status (Invoke-Api "/api/v1/business-analysts/$analystId/skills") 200 'BA skill listing'
-    Assert-Status (Invoke-Api "/api/v1/business-analysts/$analystId/skills/$skillId" 'PUT' @{
+    Assert-Status (Invoke-Api '/api/v1/agent-skills?roleId=business-analyst&domain=general') 200 'BA skill listing'
+    Assert-Status (Invoke-Api "/api/v1/agent-skills/business-analyst/general/$skillId/revisions" 'POST' @{
         name = 'Smoke test requirements analysis'; prompt = $skillPrompt; isEnabled = $true
+        changeReason = 'Configured for local smoke verification.'; actorId = $analystId
     }) 201 'BA skill configuration'
     $architectureSkills = Invoke-Api '/api/v1/agent-skills?roleId=architect&domain=general'
     Assert-Status $architectureSkills 200 'Architecture skill listing'
@@ -302,6 +294,7 @@ try {
         text = 'Add invoice export with explicit acceptance criteria.'
         businessAnalystId = $analystId; businessAnalystSkillId = $skillId
         reviewerCount = $reviewers.Count
+        developerSkills = @(@{ roleId = $developerRole; domain = 'general'; skillId = 'implementation-analysis' })
     }
     $idempotency = @{ 'Idempotency-Key' = [Guid]::NewGuid().ToString('N') }
     $submitted = Invoke-Api "/api/v1/products/$productId/feature-requests" 'POST' $intent $idempotency

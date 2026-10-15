@@ -48,7 +48,7 @@ These additions are design proposals, not previously agreed requirements. The ex
 - Product configuration currently identifies one Git source and an optional base branch; remote access uses host-provisioned Git/SSH credentials. Per-repository managed credential references are planned. Tokens must never appear in committed configuration, prompts, or workflow history.
 - Separate agent definitions and reusable skills support planning, architecture, development, and validation responsibilities.
 - .NET Aspire provides local F5 startup and resource observability with PostgreSQL, Azurite, and a local Key Vault emulator. Local user secrets seed the emulator for development; the current planner mode is `Copilot`.
-- `Agents:Mode=Copilot` is the supported local execution mode in this repository; `AzureOpenAI` mode is not implemented and is intentionally rejected by the app configuration.
+- `Agents:Mode=Copilot` is the normal local execution mode; explicit `Offline` providers support deterministic tests.
 
 The [implementation plan](IMPLEMENTATION_PLAN.md) describes staged delivery.
 The [current foundation](Code/README.md) implements the BA specification review
@@ -61,6 +61,14 @@ including builds/tests, using SDK tools. Independent validation or a required
 passing build/test gate, hosted pull requests, merge, and deployment are not
 implemented. Shared development keys and actor labels are not production
 identity or role authorization.
+
+Users define specialist expertise and deliverables through editable skill
+prompts. Each submission may select a subset by role/domain/skill key, omit
+selection to capture enabled registry defaults, or select an empty set.
+An empty set skips specialist model calls and synthesis, not BA, architecture,
+or human plan approvals. A user-defined QA prompt can request unit tests and a
+QA test plan without making those requirements hardcoded role behavior.
+Planning does not establish that tests ran or that QA/UAT signed off.
 
 ### 2.3 In scope
 

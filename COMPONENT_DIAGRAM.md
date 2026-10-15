@@ -106,13 +106,17 @@ flowchart TB
   analysis and human approval, then developer plan review. Architecture evidence is
   checked against the run's inspected snapshot; the artifact records input revisions,
   skill revision, and pinned commit.
-- Enabled `developer-*` skills are snapshotted at submission. The workflow processes
+- Selected enabled `developer-*` skills are snapshotted at submission. The workflow processes
   every captured skill in an independent bounded activity against the same
   approved context and repository snapshot. Results are persisted individually,
   checked for complete one-to-one coverage, then compared in a separate synthesis
   stage. Agreements, conflicts, and unresolved questions link to exact skill
   revisions. Planning receives both the complete original results and synthesis;
   human reviewers see them before approving the plan.
+- Users own specialist prompts. A run can use enabled registry defaults, an
+  explicit subset, or none. With none, an empty result bundle records completion
+  and synthesis is skipped. A user-defined QA skill can plan tests using that
+  same path; there is no hardcoded QA behavior or test-execution/UAT gate.
 - The Aspire AppHost composes local development dependencies: PostgreSQL, Azurite,
   the Key Vault emulator, the API, and the Azure Functions host.
 - PostgreSQL is the authoritative application database for runs, approvals, outbox records,
