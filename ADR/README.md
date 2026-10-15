@@ -24,3 +24,7 @@ Current decisions:
 - [0006: Start databases from one current schema baseline](./0006-single-current-database-baseline.md)
 - [0007: Retry invalid AI artifacts once with validation feedback](./0007-retry-invalid-ai-artifacts.md)
 - [0008: Route workflow calls through the Functions HTTP host](./0008-functions-host-http-endpoint.md)
+- [0009: Explore pinned repositories on demand](./0009-on-demand-pinned-repository-exploration.md)
+- [0010: Use scoped repository workspace tools](./0010-scoped-repository-workspace-tools.md)
+- [0011: Implement in a feature worktree with SDK built-ins](./0011-implementation-in-feature-worktree.md)
+- [0012: Remote Git sources and pinned base branches](./0012-remote-git-sources-and-pinned-base-branches.md)

@@ -197,10 +197,11 @@ public sealed class FeatureWorkflow(
             request.Revision, request.RunId);
         var (previousSpecification, feedback) =
             await store.GetFeatureSpecificationRevisionContextAsync(request.RunId, request.Revision, cancellationToken);
-        var repositorySnapshot = await repositoryCatalog.TryReadForRunAsync(request.RunId, cancellationToken);
+        await using var repositorySnapshot = await repositoryCatalog.TryReadForRunAsync(
+            request.RunId, cancellationToken);
         var specification = await businessAnalyst.CreateAsync(
             run.ProductBrief, run.Text, run.BusinessAnalystSkillName, run.BusinessAnalystPrompt,
-            previousSpecification, feedback, request.Revision, cancellationToken, repositorySnapshot?.Files);
+            previousSpecification, feedback, request.Revision, cancellationToken, repositorySnapshot?.Source);
         await store.StoreFeatureSpecificationAsync(request.RunId, request.Revision, specification, cancellationToken);
     }
 
@@ -238,7 +239,8 @@ public sealed class FeatureWorkflow(
             await store.GetArchitectureRevisionContextAsync(
                 request.RunId, request.Revision, cancellationToken);
         var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
-        var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(request.RunId, cancellationToken);
+        await using var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(
+            request.RunId, cancellationToken);
         var analysis = await architect.AnalyzeAsync(
             run.ProductBrief,
             run.Text,
@@ -249,9 +251,9 @@ public sealed class FeatureWorkflow(
             feedback,
             request.Revision,
             catalog,
-            repositorySnapshot.Files,
+            repositorySnapshot.Source,
             cancellationToken);
-        var inspectedPaths = repositorySnapshot.Files.Select(file => file.Path)
+        var inspectedPaths = repositorySnapshot.Source.Paths
             .ToHashSet(StringComparer.Ordinal);
         await store.StoreArchitectureAnalysisAsync(
             request.RunId,
@@ -303,7 +305,8 @@ public sealed class FeatureWorkflow(
             specificationRecord.SpecificationJson, System.Text.Json.JsonSerializerOptions.Web)
             ?? throw new InvalidDataException("The approved feature specification is invalid.");
         var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
-        var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(request.RunId, cancellationToken);
+        await using var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(
+            request.RunId, cancellationToken);
         logger.LogInformation(
             "Processing developer skill {SkillIndex}/{SkillCount}: {RoleId}/{Domain}/{SkillId} revision {Revision} for run {RunId}.",
             request.SkillIndex, request.SkillCount, skill.Skill.RoleId, skill.Skill.Domain,
@@ -315,7 +318,7 @@ public sealed class FeatureWorkflow(
             specification,
             architecture,
             catalog,
-            repositorySnapshot.Files,
+            repositorySnapshot.Source,
             cancellationToken);
         await store.StoreDeveloperSkillAnalysisAsync(
             request.RunId, analysis, repositorySnapshot.Commit, cancellationToken);
@@ -356,13 +359,16 @@ public sealed class FeatureWorkflow(
             ?? throw new InvalidOperationException(
                 "Cross-role synthesis requires completed analyses from every captured developer skill.");
         var snapshots = await store.GetDeveloperSkillSnapshotsAsync(runId, cancellationToken);
+        await using var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
         var synthesis = await developerCollaborator.SynthesizeAsync(
-            analyses, snapshots.Select(snapshot => snapshot.Skill).ToArray(), cancellationToken);
+            analyses,
+            snapshots.Select(snapshot => snapshot.Skill).ToArray(),
+            cancellationToken,
+            repositorySnapshot.Source);
         await store.StoreCollaborationSynthesisAsync(
             runId,
             synthesis,
-            run.RepositoryCommit
-                ?? throw new InvalidOperationException("Collaboration synthesis requires a pinned repository commit."),
+            repositorySnapshot.Commit,
             cancellationToken);
     }
 
@@ -402,7 +408,8 @@ public sealed class FeatureWorkflow(
             specificationRevision.SpecificationJson, System.Text.Json.JsonSerializerOptions.Web)
             ?? throw new InvalidDataException("The approved feature specification is invalid.");
         var catalog = await repositoryCatalog.GetForRunAsync(request.RunId, cancellationToken);
-        var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(request.RunId, cancellationToken);
+        await using var repositorySnapshot = await repositoryCatalog.ReadForRunAsync(
+            request.RunId, cancellationToken);
         var specialistAnalyses = await store.GetDeveloperSkillAnalysesAsync(
             request.RunId, cancellationToken)
             ?? throw new InvalidOperationException(
@@ -419,7 +426,7 @@ public sealed class FeatureWorkflow(
         }
         var plan = await planner.CreateAsync(
             run.ProductBrief, run.Text, specification, previousPlan, feedback,
-            request.Revision, catalog, repositorySnapshot.Files, cancellationToken,
+            request.Revision, catalog, repositorySnapshot.Source, cancellationToken,
             specialistAnalyses, collaborationSynthesis);
         await store.StorePlanAsync(request.RunId, request.Revision, plan, cancellationToken, reviewerMatches);
     }

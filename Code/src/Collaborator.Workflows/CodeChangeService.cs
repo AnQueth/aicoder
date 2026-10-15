@@ -4,6 +4,7 @@ using Collaborator.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 
 namespace Collaborator.Workflows;
@@ -78,7 +79,10 @@ public sealed class CodeChangeService(
             ? throw new InvalidDataException("Repository analysis is required before code generation.")
             : JsonSerializer.Deserialize<RepositoryCatalog>(run.RepositoryCatalogJson, Json)
                 ?? throw new InvalidDataException("The pinned repository catalog is invalid.");
-        var snapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
+        await using var snapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
+        var branchName = $"collaborator/feature-{runId:N}";
+        var implementationWorkspace = await snapshot.CreateImplementationWorktreeAsync(
+            branchName, cancellationToken);
         var input = JsonSerializer.Serialize(new
         {
             productBrief = run.ProductBrief,
@@ -87,11 +91,17 @@ public sealed class CodeChangeService(
             approvedPlan = plan,
             repositoryCommit = snapshot.Commit,
             repositoryCatalog = catalog,
-            trackedFiles = snapshot.TrackedFileModes.Keys.Order(StringComparer.Ordinal),
-            sourceFiles = snapshot.Files
+            repositorySource = snapshot.Source,
+            implementationWorkspace
         }, Json);
 
-        var proposal = await generator.GenerateCodeChangeAsync(input, cancellationToken);
+        var summary = await generator.GenerateCodeChangeAsync(input, cancellationToken);
+        var proposal = await GitWorktreeChanges.ReadProposalAsync(
+            implementationWorkspace,
+            snapshot.Commit,
+            summary,
+            snapshot.TrackedFileModes,
+            cancellationToken);
         InputRules.ValidateCodeChange(proposal, snapshot.TrackedFileModes);
         var changedFiles = proposal.Files.Select(file => file.Path).ToArray();
         if (existing is null)
@@ -124,13 +134,13 @@ public sealed class CodeChangeService(
         {
             throw new InvalidOperationException("A generated patch is required before preparing a branch.");
         }
-        if (!InputRules.IsLocalFileRepositoryUrl(run.RepositoryUrl) ||
+        if (!InputRules.IsRepositoryUrl(run.RepositoryUrl) ||
             string.IsNullOrWhiteSpace(run.RepositoryCommit))
         {
-            throw new InvalidOperationException("A local file repository and pinned commit are required to publish a review branch.");
+            throw new InvalidOperationException("A Git repository and pinned commit are required to publish a review branch.");
         }
 
-        var snapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
+        await using var snapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
         var proposal = JsonSerializer.Deserialize<CodeChangeProposal>(change.PatchJson, Json)
             ?? throw new InvalidDataException("The persisted implementation patch is invalid.");
         InputRules.ValidateCodeChange(proposal, snapshot.TrackedFileModes);
@@ -158,14 +168,14 @@ public sealed class CodeChangeService(
         if (change.Status != CodeChangeStatuses.BranchPrepared ||
             string.IsNullOrWhiteSpace(change.BranchName) ||
             string.IsNullOrWhiteSpace(change.BranchCommit) ||
-            !InputRules.IsLocalFileRepositoryUrl(run.RepositoryUrl) ||
+            !InputRules.IsRepositoryUrl(run.RepositoryUrl) ||
             string.IsNullOrWhiteSpace(run.RepositoryCommit) ||
             string.IsNullOrWhiteSpace(change.PatchJson))
         {
-            throw new InvalidOperationException("A prepared review branch and local repository are required before publication.");
+            throw new InvalidOperationException("A prepared review branch and Git repository are required before publication.");
         }
 
-        var snapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
+        await using var snapshot = await repositoryCatalog.ReadForRunAsync(runId, cancellationToken);
         var proposal = JsonSerializer.Deserialize<CodeChangeProposal>(change.PatchJson, Json)
             ?? throw new InvalidDataException("The persisted implementation patch is invalid.");
         InputRules.ValidateCodeChange(proposal, snapshot.TrackedFileModes);
@@ -199,6 +209,149 @@ public sealed class CodeChangeService(
     }
 }
 
+internal static class GitWorktreeChanges
+{
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    public static async Task<CodeChangeProposal> ReadProposalAsync(
+        string worktreePath,
+        string baseCommit,
+        string summary,
+        IReadOnlyDictionary<string, string> trackedFileModes,
+        CancellationToken cancellationToken)
+    {
+        var typeChangedPaths = ReadNullSeparated(await RepositoryCatalogService.RunGitAsync(
+            worktreePath,
+            ["diff", "--name-only", "--no-renames", "--diff-filter=T", "-z", baseCommit],
+            cancellationToken));
+        if (typeChangedPaths.Length > 0)
+        {
+            throw new InvalidDataException(
+                $"The feature worktree changed a file type for '{typeChangedPaths[0]}'.");
+        }
+
+        var changedPaths = ReadNullSeparated(await RepositoryCatalogService.RunGitAsync(
+            worktreePath,
+            ["diff", "--name-only", "--no-renames", "-z", baseCommit],
+            cancellationToken));
+        var untrackedPaths = ReadNullSeparated(await RepositoryCatalogService.RunGitAsync(
+            worktreePath,
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            cancellationToken));
+        var paths = changedPaths.Concat(untrackedPaths)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (paths.Length == 0)
+        {
+            throw new InvalidDataException("Copilot completed without changing files in its feature worktree.");
+        }
+        if (paths.Length > InputRules.MaximumCodeChangeFiles)
+        {
+            throw new InvalidDataException("The feature worktree exceeds the implementation patch file limit.");
+        }
+
+        var changes = new List<CodeFileChange>(paths.Length);
+        long totalBytes = 0;
+        foreach (var path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!RepositorySourceTools.IsEligibleSourcePath(path))
+            {
+                throw new InvalidDataException($"The feature worktree contains an ineligible changed path '{path}'.");
+            }
+
+            var fullPath = ResolveWorktreePath(worktreePath, path);
+            var tracked = trackedFileModes.ContainsKey(path);
+            if (!File.Exists(fullPath))
+            {
+                if (!tracked)
+                {
+                    throw new InvalidDataException($"The new worktree file '{path}' is missing from disk.");
+                }
+                changes.Add(new CodeFileChange(path, CodeFileOperations.Delete, null));
+                continue;
+            }
+
+            EnsureRegularFile(worktreePath, fullPath, path);
+            var fileLength = new FileInfo(fullPath).Length;
+            if (fileLength > InputRules.MaximumCodeChangeFileLength * 4L + 3)
+            {
+                throw new InvalidDataException($"The changed worktree file '{path}' exceeds the file size limit.");
+            }
+            totalBytes += fileLength;
+            if (totalBytes > InputRules.MaximumCodeChangeContentLength * 4L + 3L * paths.Length)
+            {
+                throw new InvalidDataException("The feature worktree exceeds the implementation patch content limit.");
+            }
+            var bytes = await File.ReadAllBytesAsync(fullPath, cancellationToken);
+            string content;
+            try
+            {
+                content = StrictUtf8.GetString(bytes);
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidDataException($"The changed worktree file '{path}' is not valid UTF-8 text.", exception);
+            }
+
+            changes.Add(new CodeFileChange(
+                path,
+                tracked ? CodeFileOperations.Update : CodeFileOperations.Add,
+                content));
+        }
+
+        return new CodeChangeProposal(summary, changes.ToArray());
+    }
+
+    private static string[] ReadNullSeparated(string output) =>
+        output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+
+    private static string ResolveWorktreePath(string worktreePath, string relativePath)
+    {
+        var root = Path.GetFullPath(worktreePath);
+        var fullPath = Path.GetFullPath(Path.Combine(
+            root,
+            relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var rootPrefix = Path.EndsInDirectorySeparator(root)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        if (!fullPath.StartsWith(rootPrefix, OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"The changed worktree path '{relativePath}' escapes the feature worktree.");
+        }
+        return fullPath;
+    }
+
+    private static void EnsureRegularFile(string worktreePath, string fullPath, string relativePath)
+    {
+        var relativeSegments = relativePath.Split('/');
+        var current = Path.GetFullPath(worktreePath);
+        for (var index = 0; index < relativeSegments.Length; index++)
+        {
+            current = Path.Combine(current, relativeSegments[index]);
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                throw new InvalidDataException($"The changed worktree path '{relativePath}' disappeared during collection.");
+            }
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException($"The changed worktree path '{relativePath}' contains a symbolic link.");
+            }
+            if (index < relativeSegments.Length - 1 && !Directory.Exists(current))
+            {
+                throw new InvalidDataException($"The changed worktree path '{relativePath}' has a non-directory parent.");
+            }
+            if (index == relativeSegments.Length - 1 && Directory.Exists(current))
+            {
+                throw new InvalidDataException($"The changed worktree path '{relativePath}' is a directory, not a file.");
+            }
+        }
+    }
+}
+
 internal static class GitReviewBranch
 {
     public static async Task<(string BranchName, string Commit)> PrepareAsync(
@@ -216,7 +369,8 @@ internal static class GitReviewBranch
         Directory.CreateDirectory(temporaryRoot);
         try
         {
-            await CloneAtCommitAsync(temporaryRoot, clonePath, repositoryUrl, baseCommit, cancellationToken);
+            await RepositoryCatalogService.DownloadRepositoryAsync(
+                clonePath, repositoryUrl, baseCommit, null, cancellationToken);
             var commit = await CreateCommitAsync(
                 clonePath, baseCommit, runId, patchCreatedAt, proposal, trackedFileModes, cancellationToken);
             return (branchName, commit);
@@ -247,7 +401,8 @@ internal static class GitReviewBranch
         Directory.CreateDirectory(temporaryRoot);
         try
         {
-            await CloneAtCommitAsync(temporaryRoot, clonePath, repositoryUrl, baseCommit, cancellationToken);
+            await RepositoryCatalogService.DownloadRepositoryAsync(
+                clonePath, repositoryUrl, baseCommit, null, cancellationToken);
             var actualCommit = await CreateCommitAsync(
                 clonePath, baseCommit, runId, patchCreatedAt, proposal, trackedFileModes, cancellationToken);
             if (!string.Equals(actualCommit, expectedCommit, StringComparison.OrdinalIgnoreCase))
@@ -291,28 +446,6 @@ internal static class GitReviewBranch
             {
                 RepositoryCatalogService.DeleteTemporaryDirectory(temporaryRoot);
             }
-        }
-    }
-
-    private static async Task CloneAtCommitAsync(
-        string temporaryRoot,
-        string clonePath,
-        string repositoryUrl,
-        string baseCommit,
-        CancellationToken cancellationToken)
-    {
-        await RepositoryCatalogService.RunGitAsync(temporaryRoot, [
-            "clone", "--quiet", "--no-checkout", "--depth", "1", "--no-tags", "--",
-            repositoryUrl, clonePath
-        ], cancellationToken);
-        await RepositoryCatalogService.RunGitAsync(clonePath, [
-            "fetch", "--quiet", "--no-tags", "--depth=1", "origin", baseCommit
-        ], cancellationToken);
-        var fetchedCommit = (await RepositoryCatalogService.RunGitAsync(
-            clonePath, ["rev-parse", "FETCH_HEAD"], cancellationToken)).Trim();
-        if (!string.Equals(fetchedCommit, baseCommit, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("Git did not fetch the approved plan's pinned commit.");
         }
     }
 

@@ -125,19 +125,20 @@ namespace Collaborator.ApiClient
                 }
                 var product = await api.RegisterProductAsync(
                     new ProductRegistration(
-                        options.ProductId, options.ProductName, options.ProductBrief, options.ProductRepositoryUrl), ct);
+                        options.ProductId, options.ProductName, options.ProductBrief,
+                        options.ProductRepositoryUrl, options.RepositoryBaseBranch), ct);
                 if (product.Status == HttpStatusCode.Conflict)
                 {
                     Info("  already registered (409) - reusing");
                     if (options.ProductRepositoryUrl is not null)
                     {
                         var updated = await api.UpdateProductRepositoryAsync(
-                            options.ProductId, options.ProductRepositoryUrl, ct);
+                            options.ProductId, options.ProductRepositoryUrl, ct, options.RepositoryBaseBranch);
                         if (!updated.IsSuccess)
                         {
                             return Fail($"repository configuration returned {(int)updated.Status}: {updated.Problem}");
                         }
-                        Info("  repository source configured");
+                        Info($"  repository source configured; base branch: {options.RepositoryBaseBranch ?? "(repository default)"}");
                     }
                 }
                 else if (!product.IsSuccess)
@@ -149,7 +150,7 @@ namespace Collaborator.ApiClient
                     Info("  created (201)");
                     if (options.ProductRepositoryUrl is not null)
                     {
-                        Info("  repository source configured");
+                        Info($"  repository source configured; base branch: {options.RepositoryBaseBranch ?? "(repository default)"}");
                     }
                 }
 
@@ -350,6 +351,12 @@ namespace Collaborator.ApiClient
             Phase(6, "Plan history and events");
             await PrintHistoryAsync(id, ct);
             PrintSummary(run.Status);
+            if (run.Status == "code_change_ready" && run.CodeChange is { } readyChange)
+            {
+                Console.WriteLine(ReviewHandoff.Format(
+                    run.Id, run.RepositoryUrl, run.RepositoryCommit, readyChange,
+                    Path.Combine(Environment.CurrentDirectory, $"collaborator-review-{run.Id:N}")));
+            }
             return run.Status is "code_change_ready" or "plan_approved" or "plan_rejected" or "feature_request_rejected"
                     or "architecture_rejected"
                 ? 0

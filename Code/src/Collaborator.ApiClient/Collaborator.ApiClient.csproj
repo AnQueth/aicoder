@@ -10,5 +10,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Collaborator.Core\Collaborator.Core.csproj" />
+    <InternalsVisibleTo Include="Collaborator.Tests" />
   </ItemGroup>
 </Project>

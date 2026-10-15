@@ -14,12 +14,24 @@ validator could explain what needed correction.
 
 ## Decision
 
-For business specifications, architecture assessments, and plans, validate each
+For business specifications, architecture assessments, developer skill analyses,
+collaboration syntheses, and plans, validate each
 AI response before returning it to the workflow. If the response is malformed or
 fails its contract, make one additional request in the same bounded Copilot
 session with the validator's fixed error message and the original task context.
 Validate the corrected response again. If it is still invalid, fail the workflow;
 never store or advance an invalid artifact.
+
+Developer skill analyses use the same bounded retry. Their prompt includes the
+application limits, and draft validation reports the failing field
+separately from invalid trusted skill metadata. Invalid metadata is not repaired
+by the model.
+
+Response schemas describe the output shape without string-length or array-count
+keywords. The configured provider rejected `maxItems` with HTTP 400 before
+generating a developer analysis. Keep length and count limits in the prompt and
+enforce them with application validation and the bounded correction request,
+rather than depending on provider-specific schema support.
 
 ## Consequences
 

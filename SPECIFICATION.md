@@ -2,7 +2,12 @@
 
 **Document status:** Draft for stakeholder review  
 **Version:** 0.2  
-**Date:** 2026-10-13
+**Date:** 2026-10-15
+
+This is a target product specification, not a claim that every stage or
+acceptance scenario is implemented. Section 2.2.1 distinguishes the current
+foundation from planned delivery; operational behavior is documented in the
+[Code README](Code/README.md).
 
 ## 1. Purpose and vision
 
@@ -36,21 +41,26 @@ These additions are design proposals, not previously agreed requirements. The ex
 
 ### 2.2.1 Selected implementation direction
 
-- C# on .NET 10 with a GitHub Copilot SDK-backed planner, bounded read-only repository tools, and Durable workflow orchestration.
-- Azure Durable Functions owns workflow stages, retries, and persistent human-input waits.
+- C# on .NET 10 with GitHub Copilot SDK-backed stage agents, on-demand read-only repository tools, feature-worktree implementation with SDK built-ins, and Durable workflow orchestration. The implementation worktree is not an OS sandbox.
+- Azure Durable Functions owns workflow stages, revision loops, and persistent human-input waits. The current orchestration has no explicit activity retry policy; outbox delivery retries and selected same-session AI output corrections are separate mechanisms.
 - All feature intake and user/admin interactions are REST operations; feature text submission starts processing asynchronously. A UI may be added later without owning workflow coordination.
 - PostgreSQL stores authoritative product configuration, developer/role assignments, feature state, approvals, audit, and outbox intents.
-- Product configuration identifies repositories and references scoped read-access credentials; tokens must never appear in committed configuration, prompts, or workflow history.
+- Product configuration currently identifies one Git source and an optional base branch; remote access uses host-provisioned Git/SSH credentials. Per-repository managed credential references are planned. Tokens must never appear in committed configuration, prompts, or workflow history.
 - Separate agent definitions and reusable skills support planning, architecture, development, and validation responsibilities.
 - .NET Aspire provides local F5 startup and resource observability with PostgreSQL, Azurite, and a local Key Vault emulator. Local user secrets seed the emulator for development; the current planner mode is `Copilot`.
 - `Agents:Mode=Copilot` is the supported local execution mode in this repository; `AzureOpenAI` mode is not implemented and is intentionally rejected by the app configuration.
 
 The [implementation plan](IMPLEMENTATION_PLAN.md) describes staged delivery.
 The [current foundation](Code/README.md) implements the BA specification review
-and developer plan-approval flow, bounded repository cataloging, patch generation,
-and review-branch publication for local Git sources. It does not yet support
-hosted repositories, executing generated changes, validation, hosted pull
-requests, merge, or deployment.
+and developer plan-approval flow, repository-grounded human-reviewed architecture,
+all-captured developer-skill analyses, cross-role synthesis, on-demand repository
+exploration, a validated bounded functionality catalog, worktree implementation,
+and review-branch publication for HTTPS, SSH, and local Git sources, with a
+configurable base branch pinned per run. The implementer can execute commands,
+including builds/tests, using SDK tools. Independent validation or a required
+passing build/test gate, hosted pull requests, merge, and deployment are not
+implemented. Shared development keys and actor labels are not production
+identity or role authorization.
 
 ### 2.3 In scope
 

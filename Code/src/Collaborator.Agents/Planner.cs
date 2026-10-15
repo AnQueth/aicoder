@@ -35,7 +35,7 @@ public sealed class Planner(IPlanGenerator generator)
     public async Task<DraftPlan> CreateAsync(
         string brief, string featureText, FeatureSpecification? approvedSpecification, DraftPlan? previousPlan,
         string? reviewerFeedback, int revision, RepositoryCatalog? repositoryCatalog,
-        RepositoryFileEvidence[]? sourceFiles, CancellationToken cancellationToken,
+        RepositorySourceReference? repositorySource, CancellationToken cancellationToken,
         DeveloperSkillAnalysis[]? specialistAnalyses = null,
         CollaborationSynthesis? collaborationSynthesis = null)
     {
@@ -48,7 +48,7 @@ public sealed class Planner(IPlanGenerator generator)
             previousPlan,
             reviewerFeedback,
             repositoryCatalog,
-            sourceFiles,
+            repositorySource,
             specialistAnalyses,
             collaborationSynthesis
         }, JsonSerializerOptions.Web);
@@ -68,7 +68,7 @@ public sealed class DeveloperSpecialist(IDeveloperSkillAnalysisGenerator generat
         FeatureSpecification specification,
         ArchitectureAnalysis architecture,
         RepositoryCatalog? repositoryCatalog,
-        RepositoryFileEvidence[] sourceFiles,
+        RepositorySourceReference repositorySource,
         CancellationToken cancellationToken)
     {
         var input = JsonSerializer.Serialize(new
@@ -80,7 +80,7 @@ public sealed class DeveloperSpecialist(IDeveloperSkillAnalysisGenerator generat
             skillName = skill.Name,
             skillPrompt = skill.Prompt,
             repositoryCatalog,
-            sourceFiles
+            repositorySource
         }, JsonSerializerOptions.Web);
         var draft = await generator.AnalyzeDeveloperSkillAsync(input, cancellationToken);
         return InputRules.CreateDeveloperSkillAnalysis(skill, draft);
@@ -94,7 +94,8 @@ public sealed class DeveloperCollaborator(IDeveloperCollaborationGenerator gener
     public async Task<CollaborationSynthesis> SynthesizeAsync(
         DeveloperSkillAnalysis[] analyses,
         AgentSkillRevisionReference[] capturedSkills,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RepositorySourceReference? repositorySource = null)
     {
         ArgumentNullException.ThrowIfNull(analyses);
         ArgumentNullException.ThrowIfNull(capturedSkills);
@@ -116,7 +117,8 @@ public sealed class DeveloperCollaborator(IDeveloperCollaborationGenerator gener
         var input = JsonSerializer.Serialize(new
         {
             capturedSkills,
-            specialistAnalyses = analyses
+            specialistAnalyses = analyses,
+            repositorySource
         }, JsonSerializerOptions.Web);
         var synthesis = await generator.SynthesizeDeveloperCollaborationAsync(input, cancellationToken);
         InputRules.ValidateCollaborationSynthesis(synthesis, captured);
@@ -137,7 +139,7 @@ public sealed class BusinessAnalyst(IFeatureSpecificationGenerator generator)
         string? analystFeedback,
         int revision,
         CancellationToken cancellationToken,
-        RepositoryFileEvidence[]? sourceFiles = null)
+        RepositorySourceReference? repositorySource = null)
     {
         var input = JsonSerializer.Serialize(new
         {
@@ -148,7 +150,7 @@ public sealed class BusinessAnalyst(IFeatureSpecificationGenerator generator)
             previousSpecification,
             analystFeedback,
             revision,
-            sourceFiles
+            repositorySource
         }, JsonSerializerOptions.Web);
         var specification = await generator.GenerateFeatureSpecificationAsync(input, cancellationToken);
         InputRules.ValidateFeatureSpecification(specification);
@@ -169,7 +171,7 @@ public sealed class Architect(IArchitectureAnalysisGenerator generator)
         string? reviewerFeedback,
         int revision,
         RepositoryCatalog? repositoryCatalog,
-        RepositoryFileEvidence[] sourceFiles,
+        RepositorySourceReference repositorySource,
         CancellationToken cancellationToken)
     {
         var input = JsonSerializer.Serialize(new
@@ -183,12 +185,12 @@ public sealed class Architect(IArchitectureAnalysisGenerator generator)
             reviewerFeedback,
             revision,
             repositoryCatalog,
-            sourceFiles
+            repositorySource
         }, JsonSerializerOptions.Web);
         var analysis = await generator.AnalyzeArchitectureAsync(input, cancellationToken);
         InputRules.ValidateArchitectureAnalysis(
             analysis,
-            sourceFiles.Select(file => file.Path).ToHashSet(StringComparer.Ordinal));
+            repositorySource.Paths.ToHashSet(StringComparer.Ordinal));
         return analysis;
     }
 }
@@ -272,18 +274,18 @@ public interface IPlanGenerator
     Task<DraftPlan> GenerateAsync(string input, CancellationToken cancellationToken);
 }
 
-/// <summary>Creates a structured functionality catalog from bounded repository evidence.</summary>
+/// <summary>Creates a structured functionality catalog from a pinned repository source.</summary>
 public interface IRepositoryCatalogGenerator
 {
-    /// <summary>Analyzes serialized source evidence; provider and output errors propagate to the workflow.</summary>
+    /// <summary>Analyzes the pinned repository through scoped tools; errors propagate to the workflow.</summary>
     Task<RepositoryFunctionality[]> GenerateCatalogAsync(string input, CancellationToken cancellationToken);
 }
 
-/// <summary>Generates a structured implementation patch from a human-approved plan.</summary>
+/// <summary>Implements a human-approved plan in the supplied checked-out worktree.</summary>
 public interface ICodeChangeGenerator
 {
-    /// <summary>Returns proposed file changes; provider and output errors propagate to the workflow.</summary>
-    Task<CodeChangeProposal> GenerateCodeChangeAsync(string input, CancellationToken cancellationToken);
+    /// <summary>Returns an implementation summary; provider and output errors propagate to the workflow.</summary>
+    Task<string> GenerateCodeChangeAsync(string input, CancellationToken cancellationToken);
 }
 
 /// <summary>Selects reviewer profiles and roles from serialized feature and profile data.</summary>
@@ -480,7 +482,7 @@ public sealed class OfflineFeatureSpecificationGenerator : IFeatureSpecification
 /// <summary>Rejects implementation generation in offline mode rather than inventing source changes.</summary>
 public sealed class OfflineCodeChangeGenerator : ICodeChangeGenerator
 {
-    public Task<CodeChangeProposal> GenerateCodeChangeAsync(string input, CancellationToken cancellationToken) =>
+    public Task<string> GenerateCodeChangeAsync(string input, CancellationToken cancellationToken) =>
         throw new InvalidOperationException("Code generation requires Agents:Mode=Copilot.");
 }
 

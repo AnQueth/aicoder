@@ -36,6 +36,35 @@
       "launchSettingsProfile": ""
     },
     {
+      "name": "Collaborator: API test client (invoice emailing)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "Collaborator: build API test client",
+      "program": "${workspaceFolder}/Code/src/Collaborator.ApiClient/bin/Debug/net10.0/collab-client.dll",
+      "args": [
+        "--product",
+        "invoice-emailing-sample",
+        "--product-name",
+        "Invoice Emailing Sample",
+        "--brief",
+        "A sample invoicing application. Inspect the configured repository to identify its actual invoice model, export code, and available application surfaces before proposing changes.",
+        "--repository-url",
+        "file:///H:/src/collaborator-sample-app-remote.git",
+        "--feature",
+        "Add on-demand invoice emailing to this application. Inspect the repository first and reuse its existing invoice model and CSV exporter where present; do not assume a web UI or API exists. Allow a caller to email one explicitly selected invoice to one supplied recipient address. Include the invoice ID, total, and currency in a plain-text message and attach its CSV export. Validate the recipient address and invoice before sending. Send only after an explicit caller action, never automatically when an invoice is created or exported. Return a clear success result only after the email transport accepts the message; surface validation and delivery failures distinctly, without logging invoice contents or recipient addresses. Introduce an injectable email transport with a configurable SMTP implementation; obtain credentials from external configuration, never source code. Use a fake transport in automated tests so tests never send real emails or require SMTP access. Cover message contents, CSV attachment, invalid recipient, exactly one send per explicit call, and transport failure. Preserve existing CSV export behavior. No bulk emailing, scheduling, automatic retries, HTML templates, PDF generation, or changes to the invoice record are required. Add usage and configuration documentation. If the repository has no build or test project, add the smallest compatible .NET project and test harness needed to verify the feature. Publish changes only to the workflow's review branch; do not merge.",
+        "--reviewer-count",
+        "1",
+        "--developer",
+        "invoice-email-reviewer|Invoice Email Reviewer|backend|Review explicit-send behavior, recipient validation, email transport configuration, CSV compatibility, privacy, and fake-transport tests.",
+        "--timeout",
+        "900",
+        "--interactive"
+      ],
+      "cwd": "${workspaceFolder}/Code",
+      "console": "integratedTerminal",
+      "launchSettingsProfile": ""
+    },
+    {
       "name": "Sample Product: Taskboard (F5)",
       "type": "coreclr",
       "request": "launch",

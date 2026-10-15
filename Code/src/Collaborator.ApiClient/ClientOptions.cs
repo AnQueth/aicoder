@@ -16,6 +16,7 @@ internal sealed class ClientOptions
     public string ProductBrief { get; private set; } =
         "A small web application used to exercise the Collaborator feature-request flow end to end.";
     public string? ProductRepositoryUrl { get; private set; }
+    public string? RepositoryBaseBranch { get; private set; }
     public string? Feature { get; private set; }
     public string BusinessAnalystId { get; private set; } = "default";
     public string BusinessAnalystSkillId { get; private set; } = "requirements-analysis";
@@ -55,7 +56,8 @@ internal sealed class ClientOptions
           --product <id>          Product id (default demo-product; created if missing)
           --product-name <name>   Product display name when creating
           --brief <text>          Product brief when creating
-          --repository-url <url>  Optional credential-free HTTPS, SSH, or local file Git URL
+          --repository-url <url>  Optional HTTPS, SSH, or local file Git URL without embedded secrets
+          --base-branch <name>    Branch to start features from (default: repository's default branch)
           --feature <text>        Feature request text (prompted when interactive and omitted)
           --run <guid>            Attach to an existing run instead of submitting a new feature
 
@@ -104,6 +106,11 @@ internal sealed class ClientOptions
         {
             options.ProductRepositoryUrl = repositoryUrl;
         }
+        var baseBranch = Environment.GetEnvironmentVariable("COLLABORATOR_PRODUCT_BASE_BRANCH");
+        if (!string.IsNullOrWhiteSpace(baseBranch))
+        {
+            options.RepositoryBaseBranch = baseBranch;
+        }
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -126,6 +133,7 @@ internal sealed class ClientOptions
                 case "--product-name": options.ProductName = Next(); break;
                 case "--brief": options.ProductBrief = Next(); break;
                 case "--repository-url": options.ProductRepositoryUrl = Next(); break;
+                case "--base-branch": options.RepositoryBaseBranch = Next(); break;
                 case "--feature": options.Feature = Next(); break;
                 case "--business-analyst": options.BusinessAnalystId = Next(); break;
                 case "--ba-skill": options.BusinessAnalystSkillId = Next(); break;
@@ -166,7 +174,15 @@ internal sealed class ClientOptions
         }
         if (options.ProductRepositoryUrl is not null && !InputRules.IsRepositoryUrl(options.ProductRepositoryUrl))
         {
-            throw new ArgumentException("--repository-url must be a credential-free HTTPS, SSH, or file URL.");
+            throw new ArgumentException("--repository-url must be an HTTPS, SSH, or local file URL without embedded secrets.");
+        }
+        if (!InputRules.IsRepositoryBaseBranch(options.RepositoryBaseBranch))
+        {
+            throw new ArgumentException("--base-branch must be a valid short Git branch name, such as main or develop.");
+        }
+        if (options.RepositoryBaseBranch is not null && options.ProductRepositoryUrl is null)
+        {
+            throw new ArgumentException("--base-branch requires --repository-url (or COLLABORATOR_PRODUCT_REPOSITORY_URL).");
         }
         if (!InputRules.IsText(options.BusinessAnalystId, 128) ||
             !InputRules.IsProductId(options.BusinessAnalystSkillId))

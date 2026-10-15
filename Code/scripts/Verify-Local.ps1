@@ -3,7 +3,8 @@ param(
     [string]$ApiKey = $env:COLLABORATOR_API_KEY,
     [string]$RepositoryUrl = $env:COLLABORATOR_PRODUCT_REPOSITORY_URL,
     [int]$TimeoutSeconds = 900,
-    [string]$ReportPath
+    [string]$ReportPath,
+    [string]$RepositoryBaseBranch = $env:COLLABORATOR_PRODUCT_BASE_BRANCH
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,7 @@ $reportHeader = @"
 - Started: $((Get-Date).ToString('o'))
 - Base URL: $BaseUrl
 - Repository URL: $RepositoryUrl
+- Repository base branch: $RepositoryBaseBranch
 - API key: not recorded
 - Note: This records HTTP request payloads and response bodies. It does not capture hidden prompts or internal tool messages sent between the workflow and the AI model.
 
@@ -116,8 +118,10 @@ if (-not $ApiKey) {
     }
     $ApiKey = $Matches[1].Trim()
 }
-if (-not $RepositoryUrl -or -not $RepositoryUrl.StartsWith('file://', [StringComparison]::OrdinalIgnoreCase)) {
-    $message = 'Set COLLABORATOR_PRODUCT_REPOSITORY_URL to a local file:// Git repository before running this verification.'
+$repositoryUri = $null
+if (-not [Uri]::TryCreate($RepositoryUrl, [UriKind]::Absolute, [ref]$repositoryUri) -or
+    $repositoryUri.Scheme -notin @('https', 'ssh', 'file')) {
+    $message = 'Set COLLABORATOR_PRODUCT_REPOSITORY_URL to an HTTPS, SSH, or local file:// Git repository before running this verification.'
     Add-TranscriptText "## Setup failed`r`n`r`n$message"
     throw $message
 }
@@ -285,6 +289,7 @@ try {
     Assert-Status (Invoke-Api '/api/v1/products' 'POST' @{
         id = $productId; name = 'Smoke test product'; brief = 'Synthetic invoice product for local verification.'
         repositoryUrl = $RepositoryUrl
+        repositoryBaseBranch = if ([string]::IsNullOrWhiteSpace($RepositoryBaseBranch)) { $null } else { $RepositoryBaseBranch }
     }) 201 'Product registration'
     Assert-Status (Invoke-Api "/api/v1/products/$productId/feature-requests" 'POST' @{
         text = ' '; businessAnalystId = $analystId; businessAnalystSkillId = $skillId

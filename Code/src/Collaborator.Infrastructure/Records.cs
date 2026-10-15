@@ -9,6 +9,7 @@ public sealed class Product
     public required string Name { get; set; }
     public required string Brief { get; set; }
     public string? RepositoryUrl { get; set; }
+    public string? RepositoryBaseBranch { get; set; }
     public string? RepositoryCatalogCommit { get; set; }
     public string? RepositoryCatalogJson { get; set; }
     public DateTimeOffset? RepositoryCatalogUpdatedAt { get; set; }
@@ -23,6 +24,7 @@ public sealed class FeatureRun
     public required string ProductBrief { get; set; }
     public required string IdempotencyKey { get; set; }
     public string? RepositoryUrl { get; set; }
+    public string? RepositoryBaseBranch { get; set; }
     public string? RepositoryCommit { get; set; }
     public string? RepositoryCatalogJson { get; set; }
     public required string BusinessAnalystId { get; set; }

@@ -1,7 +1,7 @@
 # Collaborator Implementation Plan
 
-**Status:** Approved direction; revisioned skills, BA clarification/approval, human-reviewed architecture, all-enabled developer-skill processing, cross-role synthesis, developer plan review, and local review-branch workflow implemented
-**Date:** 2026-10-13
+**Status:** Approved direction; revisioned skills, BA clarification/approval, human-reviewed architecture, all-enabled developer-skill processing, cross-role synthesis, developer plan review, and remote/local review-branch workflow implemented
+**Date:** 2026-10-15
 **Source:** [SPECIFICATION.md](./SPECIFICATION.md) and the subsequent requirements discussion.
 
 ## 1. Objective and agreed requirements
@@ -11,7 +11,7 @@ Build a headless application-development platform that accepts a requested featu
 The implementation will use:
 
 - C# targeting .NET 10 (`net10.0`).
-- GitHub Copilot SDK for bounded, structured agent sessions and read-only repository tools.
+- GitHub Copilot SDK for structured agent sessions and on-demand read-only repository inspection. The implementation stage alone uses all SDK built-ins, including shell/file tools, in a temporary feature worktree; collected changes are validated before publication.
 - Azure Durable Functions for persistent workflow processing.
 - .NET Aspire for local resource orchestration, service discovery, observability, and one-step F5 startup.
 - PostgreSQL for application/business data, including configuration revisions, artifacts metadata, approvals, and the transactional outbox.
@@ -34,17 +34,22 @@ snapshots, formal feature specification editing/revision/rejection/approval,
 repository-grounded architecture analysis with revision-bound human review,
 submission-time snapshots of every enabled `developer-*` skill, one analysis per
 captured skill, developer review assignments, plan revision/approval, bounded patch
-generation, and publication to a review branch in a local Git repository. The API
+generation, and publication to a review branch in an HTTPS, SSH, or local Git
+repository, starting from a configurable base branch pinned per run. The API
 has a shared development key; supplied actor IDs are not authenticated identities
 or role authorization.
 
-Current developer-skill increment verification: full solution build succeeded
-with zero warnings/errors, all 65 unit tests passed, and EF reported no pending
-model changes on 2026-10-13. The local HTTP/AppHost smoke test, live Copilot test,
-and interactive F5 debugging have not been run for this increment. Do not treat
-earlier results as verification of current changes.
+For the remote-source/base-branch change on 2026-10-15, 52 focused regression cases
+passed, the API built with zero warnings/errors, EF reported no pending model
+changes, and the smoke script passed syntax parsing. The generated Functions
+extension test build reported a NuGet vulnerability-metadata access warning.
+HTTPS/SSH paths were verified through local Git URL rewriting, not hosted
+authentication. Full-suite/live Copilot tests, applying migrations to PostgreSQL,
+the HTTP/AppHost smoke test, and interactive F5 debugging were not rerun.
+Historical results do not verify current changes; see the
+[dated verification](Code/README.md#verification).
 
-Hosted repository credentials, identity/role authorization, isolated build/test
+Managed repository credential provisioning, identity/role authorization, isolated build/test
 execution, independent validation, hosted pull-request creation, release, and
 deployment automation remain pending.
 
@@ -62,6 +67,10 @@ This is not a framework upgrade.
 No source changes, package installations, cloud provisioning, credentials, or deployments are performed by writing this plan.
 
 ### Initial boundaries
+
+These describe target delivery scope, not a list of implemented capabilities.
+The current API requires one Git source per feature run; products without source
+repositories and multi-repository runs are not supported by that intake.
 
 - Pilot one product with one or two repositories.
 - Implement one source-control provider first, selected before integration work.
@@ -144,7 +153,7 @@ PostgreSQL is the application database, not an assumed Durable Functions history
 - Persist local database and workflow state across ordinary restarts; document explicit development-only reset procedures.
 - The current AppHost uses Copilot mode by default and supports an explicitly selected offline test mode. Copilot authentication is separate from the API/workflow keys.
 - Development API/workflow keys live in AppHost user secrets and are passed to a local Key Vault emulator. This emulator setup does not establish compatibility with deployed Azure Key Vault.
-- Generated changes are written to a review branch in the configured local Git remote. The system does not run repository builds/tests, create a hosted pull request, merge, or deploy.
+- Generated changes are written to a review branch in the configured HTTPS, SSH, or local Git remote, based on the run-pinned base-branch commit. The implementer may run builds/tests using SDK tools, but publication does not independently execute or require passing checks. The system does not create a hosted pull request, merge, or deploy.
 - Verify the compatible .NET SDK, Aspire tooling, container runtime, Azure Functions Core Tools, and editor/debug extensions as prerequisites.
 
 ### Current Aspire local infrastructure inventory
@@ -156,7 +165,7 @@ PostgreSQL is the application database, not an assumed Durable Functions history
 | Durable workflow backend | Azure Storage provider backed by Azurite | The Durable Task Scheduler emulator is not used in this configuration. |
 | Development secrets | AppHost user secrets seed the Key Vault emulator | Separate from Copilot CLI authentication; not a production secret-management implementation. |
 | Model calls | GitHub Copilot SDK in normal local mode; explicit offline mode for deterministic development/tests | Copilot calls require user sign-in or a supported token; there is no automatic fallback. |
-| Repository input/output | Local `file://` Git repository | Inspection is pinned to a commit; publishing creates a unique review branch. No hosted source-control provider is configured. |
+| Repository input/output | HTTPS, SSH, or local `file://` Git source | The configured base branch (remote default if unset) is pinned to a commit; publishing creates a unique review branch without changing the base. Private access uses host-provisioned Git/SSH credentials; there is no hosted-provider API integration. |
 
 Start local resources through the AppHost. Azure managed identity, deployed Key
 Vault authorization, hosted repository credentials, and other cloud-only behavior

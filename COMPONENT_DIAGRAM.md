@@ -17,11 +17,11 @@ flowchart TB
         BRIDGE["Functions HTTP bridge<br/>internal workflow start and decision events"]
 
         subgraph WORKFLOW["Azure Durable Functions - isolated worker"]
-            ORCH["Durable orchestration<br/>stages, retries, waits, revision loops"]
+            ORCH["Durable orchestration<br/>stages, waits, revision loops"]
             ACT["Activities<br/>generate specs, architecture, one bounded<br/>analysis per skill, cross-role synthesis, plans, code"]
         end
 
-        subgraph AGENTS["GitHub Copilot SDK + bounded read-only repo tools"]
+        subgraph AGENTS["GitHub Copilot SDK + repository exploration tools"]
             BA["Business Analyst agent<br/>drafts and revises specs using<br/>human answers to open questions"]
             ARCH["Architect agent<br/>analyzes approved spec against<br/>pinned repository evidence"]
             SPECIALIST["Developer skill agents<br/>one analysis for each captured,<br/>enabled developer-* skill"]
@@ -29,7 +29,7 @@ flowchart TB
             PLAN["Planner agent<br/>drafts and revises implementation plans"]
             REVIEWER["Reviewer selector<br/>assigns developer approval ownership"]
             CATALOG["Repository catalog service<br/>indexes repo snapshot for planning"]
-            IMPLEMENTER["Code-change generator<br/>returns a validated patch"]
+            IMPLEMENTER["Code-change generator<br/>uses SDK tools in a feature worktree"]
         end
 
         SECRETS["Secret provider access<br/>Key Vault emulator / configuration values"]
@@ -44,7 +44,7 @@ flowchart TB
     end
 
     subgraph EXTERNAL["External dependencies"]
-        REPO["Configured local file:// Git repository<br/>source plus review-branch remote"]
+        REPO["Configured HTTPS, SSH, or local Git repository<br/>pinned base branch plus review-branch remote"]
         MODEL["GitHub Copilot CLI / runtime<br/>authenticated by local user or token"]
     end
 
@@ -80,7 +80,7 @@ flowchart TB
     SPECIALIST -->|"one structured result per skill"| MODEL
     COLLABORATOR -->|"structured comparison"| MODEL
     PLAN -->|"structured output"| MODEL
-    IMPLEMENTER -->|"structured patch output"| MODEL
+    IMPLEMENTER -->|"SDK worktree edits + structured summary"| MODEL
     ACT -->|"prepare / publish review branch after required reviews"| REPO
 
     API -.->|"secret resolution"| SECRETS
@@ -117,11 +117,20 @@ flowchart TB
   the Key Vault emulator, the API, and the Azure Functions host.
 - PostgreSQL is the authoritative application database for runs, approvals, outbox records,
   and audit state. The Durable task backend tracks workflow execution progress and timers.
-- Copilot agents only receive bounded read-only tools over the run-pinned repository
-  snapshot. A separate workflow activity validates the generated patch and writes
-  the result to a review branch after business-analyst, architecture, and developer
-  approvals.
-- Repository URLs currently support local `file://` Git sources only. Hosted credentials,
-  hosted pull requests, builds/tests, merge, and deployment are not implemented.
+- Copilot agents receive on-demand read-only tools over the run-pinned repository.
+  After plan approval, only the implementation agent receives all SDK built-ins
+  and works directly in a temporary feature worktree at the pinned commit. The
+  workflow collects and validates Git changes before publishing the review branch.
+  The worktree is not an OS sandbox; shell tools can access resources available
+  to the service identity.
+- Repository URLs support HTTPS, SSH, and local `file://` sources with a configurable
+  base branch. Remote access uses the host's existing Git/SSH credentials; managed
+  credential provisioning, hosted pull requests, merge, and deployment are not
+  implemented. The implementer can run builds/tests through SDK tools, but there
+  is no independent build/test gate before publication.
+- Outbox delivery retries up to ten times. The orchestration has no explicit
+  activity retry policy; activity failures record a failed run. Selected AI
+  artifact types get one same-session validation correction, which is not a
+  Durable activity retry.
 - The Key Vault emulator and user-secret seeding are development-only. Production
   identity and secret-management behavior have not been validated.

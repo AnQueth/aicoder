@@ -7,7 +7,7 @@ using System.Text.Json;
 
 namespace Collaborator.Agents;
 
-/// <summary>Runs bounded GitHub Copilot sessions with read-only tools over supplied repository snapshots.</summary>
+/// <summary>Runs structured GitHub Copilot sessions with scoped tools over supplied repository snapshots.</summary>
 public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotPlanGenerator> logger)
     : IPlanGenerator, IFeatureSpecificationGenerator, IDeveloperReviewerSelector,
         IRepositoryCatalogGenerator, ICodeChangeGenerator, IArchitectureAnalysisGenerator,
@@ -256,31 +256,13 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
         }
         """);
 
-    private static readonly JsonElement CodeChangeSchema = JsonSerializer.Deserialize<JsonElement>("""
+    private static readonly JsonElement CodeChangeSummarySchema = JsonSerializer.Deserialize<JsonElement>("""
         {
           "type": "object",
           "properties": {
-            "summary": { "type": "string" },
-            "files": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "path": { "type": "string" },
-                  "operation": { "type": "string", "enum": ["add", "update", "delete"] },
-                  "content": {
-                    "anyOf": [
-                      { "type": "string" },
-                      { "type": "null" }
-                    ]
-                  }
-                },
-                "required": ["path", "operation", "content"],
-                "additionalProperties": false
-              }
-            }
+            "summary": { "type": "string" }
           },
-          "required": ["summary", "files"],
+          "required": ["summary"],
           "additionalProperties": false
         }
         """);
@@ -471,16 +453,33 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
         try
         {
 #pragma warning disable GHCP001 // Structured output is experimental in SDK 1.0.16.
-            var response = await session.SendAndWaitAsync(new MessageOptions
+            var prompt = repositoryContext.Prompt;
+            for (var attempt = 1; attempt <= 2; attempt++)
             {
-                Prompt = repositoryContext.Prompt,
-                ResponseSchema = DeveloperSkillAnalysisSchema
-            }, timeout: TimeSpan.FromMinutes(3), cancellationToken: deadline.Token);
+                var response = await session.SendAndWaitAsync(new MessageOptions
+                {
+                    Prompt = prompt,
+                    ResponseSchema = DeveloperSkillAnalysisSchema
+                }, timeout: TimeSpan.FromMinutes(3), cancellationToken: deadline.Token);
 #pragma warning restore GHCP001
-            return JsonSerializer.Deserialize<DeveloperSkillDraft>(
-                response?.Data.Content ?? throw new InvalidDataException("Copilot returned no developer skill analysis."),
-                JsonSerializerOptions.Web)
-                ?? throw new InvalidDataException("Copilot returned a null developer skill analysis.");
+                try
+                {
+                    var draft = JsonSerializer.Deserialize<DeveloperSkillDraft>(
+                        response?.Data.Content ?? throw new InvalidDataException("Copilot returned no developer skill analysis."),
+                        JsonSerializerOptions.Web)
+                        ?? throw new InvalidDataException("Copilot returned a null developer skill analysis.");
+                    InputRules.ValidateDeveloperSkillDraft(draft);
+                    return draft;
+                }
+                catch (Exception ex) when (attempt == 1 && (ex is InvalidDataException || ex is JsonException))
+                {
+                    logger.LogWarning(
+                        "Copilot developer analysis failed validation; requesting one corrected response: {Reason}",
+                        ex.Message);
+                    prompt = BuildValidationRepairPrompt(ex.Message);
+                }
+            }
+            throw new InvalidOperationException("Developer analysis retry completed without a valid draft.");
         }
         catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
         {
@@ -497,20 +496,26 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
         }
     }
 
-    /// <summary>Compares all specialist results in a bounded Copilot session without tools or repository access.</summary>
+    /// <summary>Compares specialist results with optional read-only access to the pinned repository.</summary>
     public async Task<CollaborationSynthesis> SynthesizeDeveloperCollaborationAsync(
         string input, CancellationToken cancellationToken)
     {
+        using var inputDocument = JsonDocument.Parse(input);
+        var capturedSkills = inputDocument.RootElement.GetProperty("capturedSkills")
+            .Deserialize<AgentSkillRevisionReference[]>(JsonSerializerOptions.Web)
+            ?? throw new InvalidDataException("Collaboration input must contain captured skill revisions.");
         var definition = await File.ReadAllTextAsync(
             Path.Combine(AppContext.BaseDirectory, "Definitions", "developer-collaboration.md"), cancellationToken);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(3));
         await using var client = new CopilotClient();
         await client.StartAsync(deadline.Token);
+        var repositoryContext = RepositorySourceTools.PrepareInput(input);
         await using var session = await client.CreateSessionAsync(new SessionConfig
         {
             Model = config["Agents:Copilot:Model"],
             AvailableTools = [],
+            Tools = repositoryContext.Tools,
             EnableConfigDiscovery = false,
             SkipEmbeddingRetrieval = true,
             SystemMessage = new SystemMessageConfig
@@ -520,23 +525,41 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
             },
 #pragma warning disable GHCP001 // The pinned SDK exposes permission decisions as experimental.
             OnPermissionRequest = (_, _) =>
-                Task.FromResult(PermissionDecision.Reject("Cross-role synthesis does not need tools or permissions."))
+                Task.FromResult(PermissionDecision.Reject("Only registered read-only repository tools may execute."))
 #pragma warning restore GHCP001
         }, deadline.Token);
+        using var toolInvocationSubscription = ObserveRepositoryToolInvocations(session);
 
         try
         {
 #pragma warning disable GHCP001 // Structured output is experimental in SDK 1.0.16.
-            var response = await session.SendAndWaitAsync(new MessageOptions
+            var prompt = repositoryContext.Prompt;
+            for (var attempt = 1; attempt <= 2; attempt++)
             {
-                Prompt = input,
-                ResponseSchema = DeveloperCollaborationSchema
-            }, timeout: TimeSpan.FromMinutes(3), cancellationToken: deadline.Token);
+                var response = await session.SendAndWaitAsync(new MessageOptions
+                {
+                    Prompt = prompt,
+                    ResponseSchema = DeveloperCollaborationSchema
+                }, timeout: TimeSpan.FromMinutes(3), cancellationToken: deadline.Token);
 #pragma warning restore GHCP001
-            return JsonSerializer.Deserialize<CollaborationSynthesis>(
-                response?.Data.Content ?? throw new InvalidDataException("Copilot returned no collaboration synthesis."),
-                JsonSerializerOptions.Web)
-                ?? throw new InvalidDataException("Copilot returned a null collaboration synthesis.");
+                try
+                {
+                    var synthesis = JsonSerializer.Deserialize<CollaborationSynthesis>(
+                        response?.Data.Content ?? throw new InvalidDataException("Copilot returned no collaboration synthesis."),
+                        JsonSerializerOptions.Web)
+                        ?? throw new InvalidDataException("Copilot returned a null collaboration synthesis.");
+                    InputRules.ValidateCollaborationSynthesis(synthesis, capturedSkills.ToHashSet());
+                    return synthesis;
+                }
+                catch (Exception ex) when (attempt == 1 && (ex is InvalidDataException || ex is JsonException))
+                {
+                    logger.LogWarning(
+                        "Copilot collaboration synthesis failed validation; requesting one corrected response: {Reason}",
+                        ex.Message);
+                    prompt = BuildValidationRepairPrompt(ex.Message);
+                }
+            }
+            throw new InvalidOperationException("Collaboration synthesis retry completed without a valid artifact.");
         }
         catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
         {
@@ -752,21 +775,28 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
         }
     }
 
-    public async Task<CodeChangeProposal> GenerateCodeChangeAsync(
+    public async Task<string> GenerateCodeChangeAsync(
         string input, CancellationToken cancellationToken)
     {
+        var timeout = TimeSpan.FromMinutes(10);
         var definition = await File.ReadAllTextAsync(
             Path.Combine(AppContext.BaseDirectory, "Definitions", "implementer.md"), cancellationToken);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(TimeSpan.FromMinutes(3));
+        deadline.CancelAfter(timeout);
         await using var client = new CopilotClient();
         await client.StartAsync(deadline.Token);
         var repositoryContext = RepositorySourceTools.PrepareInput(input);
+        if (repositoryContext.WorkingDirectory is not { Length: > 0 } workingDirectory ||
+            !Directory.Exists(workingDirectory))
+        {
+            throw new InvalidDataException("Code generation requires an existing feature worktree.");
+        }
         await using var session = await client.CreateSessionAsync(new SessionConfig
         {
             Model = config["Agents:Copilot:Model"],
-            AvailableTools = [],
+            AvailableTools = new ToolSet().AddBuiltIn("*").AddCustom("*"),
             Tools = repositoryContext.Tools,
+            WorkingDirectory = workingDirectory,
             EnableConfigDiscovery = false,
             SkipEmbeddingRetrieval = true,
             SystemMessage = new SystemMessageConfig
@@ -776,12 +806,16 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
             },
 #pragma warning disable GHCP001 // The pinned SDK exposes permission decisions as experimental.
             OnPermissionRequest = (_, _) =>
-                Task.FromResult(PermissionDecision.Reject("Only registered read-only repository tools may execute."))
+            {
+                logger.LogWarning(
+                    "Approving a Copilot SDK tool permission request for the approved implementation worktree.");
+                return Task.FromResult(PermissionDecision.ApproveOnce());
+            }
 #pragma warning restore GHCP001
         }, deadline.Token);
         using var toolInvocationSubscription = ObserveRepositoryToolInvocations(session);
         logger.LogInformation(
-            "Copilot code-generation session started with {ToolCount} repository tools.",
+            "Copilot code-generation session started with {ToolCount} read-only repository tools and all SDK built-ins.",
             repositoryContext.Tools.Count);
         try
         {
@@ -789,17 +823,15 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
             var response = await session.SendAndWaitAsync(new MessageOptions
             {
                 Prompt = repositoryContext.Prompt,
-                ResponseSchema = CodeChangeSchema
-            }, timeout: TimeSpan.FromMinutes(3), cancellationToken: deadline.Token);
+                ResponseSchema = CodeChangeSummarySchema
+            }, timeout: timeout, cancellationToken: deadline.Token);
 #pragma warning restore GHCP001
-            var proposal = JsonSerializer.Deserialize<CodeChangeProposal>(
-                response?.Data.Content ?? throw new InvalidDataException("Copilot returned no implementation patch."),
-                JsonSerializerOptions.Web)
-                ?? throw new InvalidDataException("Copilot returned a null implementation patch.");
-            logger.LogInformation(
-                "Copilot code-generation session completed with {FileCount} proposed files.",
-                proposal.Files?.Length);
-            return proposal;
+            using var document = JsonDocument.Parse(
+                response?.Data.Content ?? throw new InvalidDataException("Copilot returned no implementation summary."));
+            var summary = document.RootElement.GetProperty("summary").GetString()
+                ?? throw new InvalidDataException("Copilot returned an empty implementation summary.");
+            logger.LogInformation("Copilot code-generation session completed.");
+            return summary;
         }
         catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
         {
@@ -832,6 +864,13 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
     private static IReadOnlySet<string> GetInspectedPaths(string input)
     {
         using var document = JsonDocument.Parse(input);
+        if (document.RootElement.TryGetProperty("repositorySource", out var sourceElement) &&
+            sourceElement.ValueKind == JsonValueKind.Object)
+        {
+            var source = sourceElement.Deserialize<RepositorySourceReference>(JsonSerializerOptions.Web);
+            return source?.Paths.ToHashSet(StringComparer.Ordinal)
+                ?? new HashSet<string>(StringComparer.Ordinal);
+        }
         if (!document.RootElement.TryGetProperty("sourceFiles", out var filesElement) ||
             filesElement.ValueKind != JsonValueKind.Array)
         {
@@ -853,7 +892,10 @@ public sealed class CopilotPlanGenerator(IConfiguration config, ILogger<CopilotP
                 toolEvent.Data.ToolName is { } toolName &&
                 toolName is "list_repository_source_files" or
                     "search_repository_source" or
-                    "read_repository_source_file")
+                    "search_repository_source_regex" or
+                    "read_repository_source_file" or
+                    "write_repository_source_file" or
+                    "delete_repository_source_file")
             {
                 logger.LogInformation("Copilot repository source tool invoked: {ToolName}", toolName);
             }

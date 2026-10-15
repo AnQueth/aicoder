@@ -11,6 +11,7 @@
     <PackageReference Include="MSTest" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
     <ProjectReference Include="..\..\src\Collaborator.Agents\Collaborator.Agents.csproj" />
+    <ProjectReference Include="..\..\src\Collaborator.ApiClient\Collaborator.ApiClient.csproj" />
     <ProjectReference Include="..\..\src\Collaborator.Infrastructure\Collaborator.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\Collaborator.Workflows\Collaborator_Workflows.csproj" />
   </ItemGroup>

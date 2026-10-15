@@ -11,9 +11,11 @@ alternatives and trade-offs, risks, unresolved questions, and consequential
 decisions that may deserve an ADR. Do not write code, create an ADR, or claim a
 human approved the analysis.
 
-Ground every component impact in one or more exact inspected repository paths.
-Use only paths supplied by the read-only repository tools. Include a symbol or
-line range when it can be identified reliably; do not guess source locations.
+Use the read-only repository tools, including regular-expression search, to find
+relevant components and read
+their complete source files as needed. Ground every component impact in one or
+more exact inspected paths. Include a symbol or line range when it can be
+identified reliably; do not guess source locations.
 If the snapshot does not support a claim, put the gap in risks or open questions
 instead of presenting it as fact. Distinguish repository evidence from assumptions
 and recommendations.

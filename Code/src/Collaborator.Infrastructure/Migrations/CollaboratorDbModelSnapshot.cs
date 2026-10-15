@@ -243,6 +243,9 @@ namespace Collaborator.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("character varying(80)");
 
+                    b.Property<string>("RepositoryBaseBranch")
+                        .HasColumnType("text");
+
                     b.Property<string>("RepositoryCatalogJson")
                         .HasColumnType("text");
 
@@ -410,6 +413,9 @@ namespace Collaborator.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
+
+                    b.Property<string>("RepositoryBaseBranch")
+                        .HasColumnType("text");
 
                     b.Property<string>("RepositoryCatalogCommit")
                         .HasColumnType("text");

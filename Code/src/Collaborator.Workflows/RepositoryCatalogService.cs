@@ -4,30 +4,18 @@ using Collaborator.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
-using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
 namespace Collaborator.Workflows;
 
-/// <summary>Inspects a run's local Git source, generates a validated catalog, and pins it to the run.</summary>
+/// <summary>Opens a run's pinned Git source, generates a validated catalog, and pins it to the run.</summary>
 public sealed class RepositoryCatalogService(
     CollaboratorDb db,
     IRepositoryCatalogGenerator generator,
     ILogger<RepositoryCatalogService> logger)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-    private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".cs", ".csproj", ".css", ".go", ".html", ".java", ".js", ".jsx",
-        ".md", ".py", ".rs", ".sql", ".ts", ".tsx"
-    };
-
-    private static readonly HashSet<string> ExcludedDirectories = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".git", ".vs", "bin", "build", "dist", "node_modules", "obj", "packages", "vendor"
-    };
-
     /// <summary>Returns the run-pinned catalog or builds and persists one for the source commit.</summary>
     public async Task<RepositoryCatalog> GetForRunAsync(Guid runId, CancellationToken cancellationToken)
     {
@@ -38,35 +26,43 @@ public sealed class RepositoryCatalogService(
                 ?? throw new InvalidDataException("The persisted repository catalog is invalid.");
         }
 
-        if (!InputRules.IsLocalFileRepositoryUrl(run.RepositoryUrl))
+        if (!InputRules.IsRepositoryUrl(run.RepositoryUrl))
         {
             throw new InvalidOperationException(
-                "A local file:// Git repository is required before a plan can be generated.");
+                "An HTTPS, SSH, or local file Git repository is required before a plan can be generated.");
         }
 
-        var snapshot = await ReadRepositoryAsync(run.RepositoryUrl!, run.RepositoryCommit, cancellationToken);
+        await using var snapshot = await ReadRepositoryAsync(
+            run.RepositoryUrl!, run.RepositoryCommit, run.RepositoryBaseBranch, cancellationToken);
         var product = await db.Products.SingleAsync(x => x.Id == run.ProductId, cancellationToken);
         RepositoryCatalog catalog;
         var reused = false;
+        var cachedCatalog = product.RepositoryCatalogJson is { } cachedJson
+            ? JsonSerializer.Deserialize<RepositoryCatalog>(cachedJson, Json)
+                ?? throw new InvalidDataException("The cached repository catalog is invalid.")
+            : null;
         if (product.RepositoryCatalogCommit == snapshot.Commit &&
-            product.RepositoryCatalogJson is { } cachedJson)
+            cachedCatalog is { FormatVersion: RepositoryCatalog.CurrentFormatVersion })
         {
             reused = true;
-            catalog = JsonSerializer.Deserialize<RepositoryCatalog>(cachedJson, Json)
-                ?? throw new InvalidDataException("The cached repository catalog is invalid.");
+            catalog = cachedCatalog;
         }
         else
         {
             var analysisInput = JsonSerializer.Serialize(new
             {
                 repositoryCommit = snapshot.Commit,
-                sourceFiles = snapshot.Files
+                repositorySource = snapshot.Source
             }, Json);
             var functionalities = await generator.GenerateCatalogAsync(analysisInput, cancellationToken);
-            var inspectedPaths = snapshot.Files.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
+            var inspectedPaths = snapshot.Source.Paths.ToHashSet(StringComparer.Ordinal);
             InputRules.ValidateRepositoryCatalog(functionalities, inspectedPaths);
             catalog = new RepositoryCatalog(
-                snapshot.Commit, DateTimeOffset.UtcNow, snapshot.Files.Length, functionalities);
+                snapshot.Commit,
+                DateTimeOffset.UtcNow,
+                snapshot.Source.Paths.Length,
+                functionalities,
+                RepositoryCatalog.CurrentFormatVersion);
 
             product.RepositoryCatalogCommit = catalog.Commit;
             product.RepositoryCatalogJson = JsonSerializer.Serialize(catalog, Json);
@@ -97,7 +93,7 @@ public sealed class RepositoryCatalogService(
         return catalog;
     }
 
-    /// <summary>Reads bounded text and the tracked-file inventory at a run's pinned commit.</summary>
+    /// <summary>Opens the tracked text source at a run's pinned commit for on-demand reads.</summary>
     internal async Task<RepositorySnapshot> ReadForRunAsync(Guid runId, CancellationToken cancellationToken)
     {
         var snapshot = await TryReadForRunAsync(runId, cancellationToken);
@@ -105,124 +101,75 @@ public sealed class RepositoryCatalogService(
             "A repository URL and pinned commit are required to generate code.");
     }
 
-    /// <summary>Reads and pins a local repository snapshot when one is configured for the run.</summary>
+    /// <summary>Opens and pins a repository snapshot when one is configured for the run.</summary>
     internal async Task<RepositorySnapshot?> TryReadForRunAsync(
         Guid runId, CancellationToken cancellationToken)
     {
         var run = await db.Runs.SingleAsync(x => x.Id == runId, cancellationToken);
-        if (!InputRules.IsLocalFileRepositoryUrl(run.RepositoryUrl))
+        if (run.RepositoryUrl is null)
         {
             return null;
         }
 
-        var snapshot = await ReadRepositoryAsync(run.RepositoryUrl!, run.RepositoryCommit, cancellationToken);
-        if (run.RepositoryCommit is null)
+        var snapshot = await ReadRepositoryAsync(
+            run.RepositoryUrl, run.RepositoryCommit, run.RepositoryBaseBranch, cancellationToken);
+        try
         {
-            run.RepositoryCommit = snapshot.Commit;
-            await db.SaveChangesAsync(cancellationToken);
+            if (run.RepositoryCommit is null)
+            {
+                run.RepositoryCommit = snapshot.Commit;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            else if (!string.Equals(snapshot.Commit, run.RepositoryCommit, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The repository snapshot does not match the run-pinned commit.");
+            }
+            return snapshot;
         }
-        else if (!string.Equals(snapshot.Commit, run.RepositoryCommit, StringComparison.OrdinalIgnoreCase))
+        catch
         {
-            throw new InvalidDataException("The repository snapshot does not match the run-pinned commit.");
+            await snapshot.DisposeAsync();
+            throw;
         }
-        return snapshot;
     }
 
     private static async Task<RepositorySnapshot> ReadRepositoryAsync(
-        string repositoryUrl, string? expectedCommit, CancellationToken cancellationToken)
+        string repositoryUrl, string? expectedCommit, string? baseBranch, CancellationToken cancellationToken)
     {
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"collaborator-repo-{Guid.NewGuid():N}");
         var clonePath = Path.Combine(temporaryRoot, "source");
         Directory.CreateDirectory(temporaryRoot);
+        var keepClone = false;
         try
         {
-            await RunGitAsync(temporaryRoot, [
-                "clone", "--quiet", "--no-checkout", "--depth", "1", "--no-tags", "--",
-                repositoryUrl, clonePath
-            ], cancellationToken);
-            if (expectedCommit is not null)
-            {
-                if (!IsCommitId(expectedCommit))
-                {
-                    throw new InvalidDataException("The persisted repository commit identifier is invalid.");
-                }
-                await RunGitAsync(clonePath, [
-                    "fetch", "--quiet", "--no-tags", "--depth=1", "origin", expectedCommit
-                ], cancellationToken);
-            }
+            var commit = await DownloadRepositoryAsync(
+                clonePath, repositoryUrl, expectedCommit, baseBranch, cancellationToken);
 
-            var revision = expectedCommit is null ? "HEAD" : "FETCH_HEAD";
-            var commit = (await RunGitAsync(clonePath, ["rev-parse", revision], cancellationToken)).Trim();
-            if (commit.Length is not (40 or 64) || !commit.All(Uri.IsHexDigit))
-            {
-                throw new InvalidDataException("Git returned an invalid repository commit identifier.");
-            }
-
-            var tree = await RunGitAsync(clonePath, ["ls-tree", "-r", "-z", revision], cancellationToken);
+            var tree = await RunGitAsync(clonePath, ["ls-tree", "-r", "-z", commit], cancellationToken);
             var treeFiles = ParseTree(tree);
             var trackedFileModes = treeFiles.ToDictionary(
                 file => file.Path, file => file.Mode, StringComparer.Ordinal);
             var paths = treeFiles
                 .Where(file => file.Type == "blob" &&
                     (file.Mode is "100644" or "100755") &&
-                    IsIndexablePath(file.Path))
+                    RepositorySourceTools.IsEligibleSourcePath(file.Path))
                 .Select(file => file.Path)
+                .Order(StringComparer.Ordinal)
                 .ToArray();
             if (paths.Length == 0)
             {
-                throw new InvalidDataException("The Git repository contains no supported source or documentation files.");
+                throw new InvalidDataException("The Git repository contains no eligible tracked text files.");
             }
-            if (paths.Length > InputRules.MaximumRepositoryFiles)
-            {
-                throw new InvalidDataException(
-                    $"Repository analysis is limited to {InputRules.MaximumRepositoryFiles} tracked source files; found {paths.Length}.");
-            }
-
-            var files = new List<RepositoryFileEvidence>(paths.Length);
-            var totalLength = 0;
-            foreach (var path in paths)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var objectPath = $"{revision}:{path}";
-                var sizeText = (await RunGitAsync(clonePath, ["cat-file", "-s", objectPath], cancellationToken)).Trim();
-                if (!long.TryParse(sizeText, NumberStyles.None, CultureInfo.InvariantCulture, out var byteLength))
-                {
-                    throw new InvalidDataException($"Git returned an invalid file size for '{path}'.");
-                }
-                if (byteLength > InputRules.MaximumRepositoryFileLength * 4L)
-                {
-                    throw new InvalidDataException(
-                        $"Repository file '{path}' exceeds the {InputRules.MaximumRepositoryFileLength}-character analysis limit.");
-                }
-
-                var content = await RunGitAsync(clonePath, ["show", objectPath], cancellationToken);
-                if (content.Contains('\0'))
-                {
-                    continue;
-                }
-                if (content.Length > InputRules.MaximumRepositoryFileLength)
-                {
-                    throw new InvalidDataException(
-                        $"Repository file '{path}' exceeds the {InputRules.MaximumRepositoryFileLength}-character analysis limit.");
-                }
-                totalLength += content.Length;
-                if (totalLength > InputRules.MaximumRepositoryContentLength)
-                {
-                    throw new InvalidDataException(
-                        $"Repository analysis is limited to {InputRules.MaximumRepositoryContentLength} total source characters.");
-                }
-                files.Add(new RepositoryFileEvidence(path, content));
-            }
-
-            if (files.Count == 0)
-            {
-                throw new InvalidDataException("No readable text files were available for repository analysis.");
-            }
-            return new RepositorySnapshot(commit, files.ToArray(), trackedFileModes);
+            keepClone = true;
+            return new RepositorySnapshot(
+                commit,
+                new RepositorySourceReference(clonePath, commit, paths),
+                trackedFileModes,
+                temporaryRoot);
         }
         finally
         {
-            if (Directory.Exists(temporaryRoot))
+            if (!keepClone && Directory.Exists(temporaryRoot))
             {
                 DeleteTemporaryDirectory(temporaryRoot);
             }
@@ -252,24 +199,36 @@ public sealed class RepositoryCatalogService(
     private static bool IsCommitId(string commit) =>
         commit.Length is 40 or 64 && commit.All(Uri.IsHexDigit);
 
-    private static bool IsIndexablePath(string path)
+    internal static async Task<string> DownloadRepositoryAsync(
+        string clonePath, string repositoryUrl, string? expectedCommit, string? baseBranch,
+        CancellationToken cancellationToken)
     {
-        var segments = path.Split('/');
-        if (segments.Any(segment => ExcludedDirectories.Contains(segment)) ||
-            segments.Any(segment => segment.StartsWith(".", StringComparison.Ordinal)))
+        if (!InputRules.IsRepositoryUrl(repositoryUrl) ||
+            !InputRules.IsRepositoryBaseBranch(baseBranch))
         {
-            return false;
+            throw new InvalidDataException("The repository URL or base branch is invalid.");
+        }
+        if (expectedCommit is not null && !IsCommitId(expectedCommit))
+        {
+            throw new InvalidDataException("The persisted repository commit identifier is invalid.");
         }
 
-        var fileName = segments[^1];
-        if (fileName.StartsWith(".env", StringComparison.OrdinalIgnoreCase) ||
-            fileName.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
-            fileName.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".lock", StringComparison.OrdinalIgnoreCase))
+        Directory.CreateDirectory(clonePath);
+        await RunGitAsync(clonePath, ["init", "--quiet"], cancellationToken);
+        await RunGitAsync(clonePath, ["remote", "add", "origin", repositoryUrl], cancellationToken);
+        // Fetch the exact branch, not a same-named tag. Replays use only the pinned commit.
+        var revision = expectedCommit ?? (baseBranch is null ? "HEAD" : $"refs/heads/{baseBranch}");
+        await RunGitAsync(clonePath, [
+            "fetch", "--quiet", "--no-tags", "--depth=1", "origin", revision
+        ], cancellationToken);
+        var commit = (await RunGitAsync(
+            clonePath, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"], cancellationToken)).Trim();
+        if (!IsCommitId(commit) ||
+            expectedCommit is not null && !string.Equals(commit, expectedCommit, StringComparison.OrdinalIgnoreCase))
         {
-            return false;
+            throw new InvalidDataException("Git did not fetch the requested repository commit.");
         }
-        return SourceExtensions.Contains(Path.GetExtension(fileName));
+        return commit;
     }
 
     internal static async Task<string> RunGitAsync(
@@ -304,6 +263,8 @@ public sealed class RepositoryCatalogService(
             {
                 process.StartInfo.Environment[name] = value;
             }
+            process.StartInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
+            process.StartInfo.Environment["GCM_INTERACTIVE"] = "Never";
         }
         foreach (var argument in arguments)
         {
@@ -358,10 +319,61 @@ public sealed class RepositoryCatalogService(
         Directory.Delete(path, recursive: true);
     }
 
-    internal sealed record RepositorySnapshot(
-        string Commit,
-        RepositoryFileEvidence[] Files,
-        IReadOnlyDictionary<string, string> TrackedFileModes);
+    internal sealed class RepositorySnapshot : IAsyncDisposable
+    {
+        private readonly string temporaryRoot;
+
+        public RepositorySnapshot(
+            string commit,
+            RepositorySourceReference source,
+            IReadOnlyDictionary<string, string> trackedFileModes,
+            string temporaryRoot)
+        {
+            Commit = commit;
+            Source = source;
+            TrackedFileModes = trackedFileModes;
+            this.temporaryRoot = temporaryRoot;
+        }
+
+        public string Commit { get; }
+        public RepositorySourceReference Source { get; }
+        public IReadOnlyDictionary<string, string> TrackedFileModes { get; }
+
+        public async Task<string> CreateImplementationWorktreeAsync(
+            string branchName, CancellationToken cancellationToken)
+        {
+            var worktreePath = Path.Combine(temporaryRoot, "implementation");
+            await RunGitAsync(Source.GitDirectory, [
+                "check-ref-format", "--branch", branchName
+            ], cancellationToken);
+            await RunGitAsync(Source.GitDirectory, [
+                "worktree", "add", "-b", branchName, worktreePath, Commit
+            ], cancellationToken);
+
+            var checkedOutCommit = (await RunGitAsync(
+                worktreePath, ["rev-parse", "HEAD"], cancellationToken)).Trim();
+            if (!string.Equals(checkedOutCommit, Commit, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The implementation worktree does not match the pinned repository commit.");
+            }
+            var checkedOutBranch = (await RunGitAsync(
+                worktreePath, ["branch", "--show-current"], cancellationToken)).Trim();
+            if (!string.Equals(checkedOutBranch, branchName, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The implementation worktree is not on its assigned feature branch.");
+            }
+            return worktreePath;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                DeleteTemporaryDirectory(temporaryRoot);
+            }
+            return ValueTask.CompletedTask;
+        }
+    }
 
     private sealed record RepositoryTreeFile(string Mode, string Type, string Path);
 }

@@ -1,10 +1,11 @@
 namespace Collaborator.Core;
 
 /// <summary>A product with a reviewed brief and an optional source repository.</summary>
-public sealed record ProductRegistration(string Id, string Name, string Brief, string? RepositoryUrl = null);
+public sealed record ProductRegistration(
+    string Id, string Name, string Brief, string? RepositoryUrl = null, string? RepositoryBaseBranch = null);
 
 /// <summary>Changes the optional Git repository configured for a product.</summary>
-public sealed record RepositorySourceUpdate(string? RepositoryUrl);
+public sealed record RepositorySourceUpdate(string? RepositoryUrl, string? RepositoryBaseBranch = null);
 
 /// <summary>The requested feature intent and the analyst skill to use, not an approved specification.</summary>
 public sealed record FeatureSubmission(
@@ -97,8 +98,11 @@ public sealed record PlanDecisionSignal(int Revision, string Decision);
 /// <summary>Activity input that requests an exact plan revision.</summary>
 public sealed record PlanGenerationRequest(Guid RunId, int Revision);
 
-/// <summary>A source file included as untrusted evidence for repository analysis.</summary>
+/// <summary>A text file included as untrusted evidence for offline analysis and tests.</summary>
 public sealed record RepositoryFileEvidence(string Path, string Content);
+
+/// <summary>A read-only handle to text files at one pinned commit in a temporary Git clone.</summary>
+public sealed record RepositorySourceReference(string GitDirectory, string Commit, string[] Paths);
 
 /// <summary>A repository capability with locations that can be verified against inspected files.</summary>
 public sealed record RepositoryFunctionality(string Name, string Description, string[] Paths, string[] Symbols);
@@ -108,7 +112,11 @@ public sealed record RepositoryCatalog(
     string Commit,
     DateTimeOffset GeneratedAt,
     int FilesAnalyzed,
-    RepositoryFunctionality[] Functionalities);
+    RepositoryFunctionality[] Functionalities,
+    int FormatVersion = 0)
+{
+    public const int CurrentFormatVersion = 2;
+}
 
 /// <summary>A requested add, update, or delete in the proposed implementation patch.</summary>
 public sealed record CodeFileChange(string Path, string Operation, string? Content);
@@ -308,15 +316,11 @@ public static class InputRules
             !skill.Skill.RoleId.StartsWith("developer-", StringComparison.Ordinal) ||
             !IsProductId(skill.Skill.Domain) || !IsProductId(skill.Skill.SkillId) ||
             skill.Skill.Revision < 1 || !IsText(skill.Name, 200) ||
-            !IsText(skill.Prompt, MaximumAgentSkillPromptLength) ||
-            !IsText(draft.Summary, 4_000) ||
-            !IsBoundedTextList(draft.ProposedChanges, 1, 30, 2_000) ||
-            !IsBoundedTextList(draft.Risks, 0, 30, 1_000) ||
-            !IsBoundedTextList(draft.VerificationNeeds, 0, 30, 1_000) ||
-            !IsBoundedTextList(draft.OpenQuestions, 0, 30, 1_000))
+            !IsText(skill.Prompt, MaximumAgentSkillPromptLength))
         {
-            throw new InvalidDataException("A captured developer skill or its analysis is invalid.");
+            throw new InvalidDataException("The captured developer skill identity, revision, name, or prompt is invalid.");
         }
+        ValidateDeveloperSkillDraft(draft);
 
         return new DeveloperSkillAnalysis(
             skill.Skill.RoleId,
@@ -331,20 +335,40 @@ public static class InputRules
             draft.OpenQuestions);
     }
 
+    /// <summary>Checks generated analysis before attaching trusted skill metadata.</summary>
+    public static void ValidateDeveloperSkillDraft(DeveloperSkillDraft draft)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        if (!IsText(draft.Summary, 4_000))
+        {
+            throw new InvalidDataException("Developer analysis summary must contain 1 to 4000 non-whitespace characters.");
+        }
+        if (!IsBoundedTextList(draft.ProposedChanges, 1, 30, 2_000))
+        {
+            throw new InvalidDataException("Developer analysis proposedChanges must contain 1 to 30 nonempty strings, each at most 2000 characters.");
+        }
+        if (!IsBoundedTextList(draft.Risks, 0, 30, 1_000))
+        {
+            throw new InvalidDataException("Developer analysis risks must be an array of 0 to 30 nonempty strings, each at most 1000 characters.");
+        }
+        if (!IsBoundedTextList(draft.VerificationNeeds, 0, 30, 1_000))
+        {
+            throw new InvalidDataException("Developer analysis verificationNeeds must be an array of 0 to 30 nonempty strings, each at most 1000 characters.");
+        }
+        if (!IsBoundedTextList(draft.OpenQuestions, 0, 30, 1_000))
+        {
+            throw new InvalidDataException("Developer analysis openQuestions must be an array of 0 to 30 nonempty strings, each at most 1000 characters.");
+        }
+    }
+
     /// <summary>Maximum accepted feature-text length.</summary>
     public const int MaximumTextLength = 16_000;
 
     /// <summary>Maximum accepted rejection reason or revision feedback length.</summary>
     public const int MaximumCommentLength = 4_000;
 
-    /// <summary>Maximum source files included in one repository analysis.</summary>
-    public const int MaximumRepositoryFiles = 64;
-
-    /// <summary>Maximum characters included from one tracked source file.</summary>
-    public const int MaximumRepositoryFileLength = 12_000;
-
-    /// <summary>Maximum total source characters included in one repository analysis.</summary>
-    public const int MaximumRepositoryContentLength = 160_000;
+    /// <summary>Maximum characters in one generated implementation file.</summary>
+    public const int MaximumCodeChangeFileLength = 24_000;
 
     /// <summary>Maximum files in one generated implementation patch.</summary>
     public const int MaximumCodeChangeFiles = 32;
@@ -624,21 +648,38 @@ public static class InputRules
         id is { Length: > 0 and <= 80 } &&
         id.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
 
-    /// <summary>Accepts credential-free HTTPS, SSH, or local file repository URLs.</summary>
+    /// <summary>Accepts HTTPS, SSH (with an optional username), or local file URLs without embedded secrets.</summary>
     public static bool IsRepositoryUrl(string? value)
     {
         if (value is not { Length: > 0 and <= 2048 } ||
             !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
-            uri.UserInfo.Length > 0 || uri.Query.Length > 0 || uri.Fragment.Length > 0)
+            value.Any(char.IsControl) ||
+            uri.Query.Length > 0 || uri.Fragment.Length > 0 ||
+            (uri.UserInfo.Length > 0 &&
+                (uri.Scheme != "ssh" || Uri.UnescapeDataString(uri.UserInfo).Contains(':'))))
         {
             return false;
         }
 
-        return uri.Scheme is "https" or "ssh" or "file" &&
-            (uri.Scheme == "file" || !string.IsNullOrWhiteSpace(uri.Host));
+        return uri.Scheme is "https" or "ssh" && !string.IsNullOrWhiteSpace(uri.Host) ||
+            uri.Scheme == "file" && !uri.IsUnc && !string.IsNullOrWhiteSpace(uri.LocalPath);
     }
 
-    /// <summary>Accepts only credential-free local file URLs for repository inspection.</summary>
+    /// <summary>Accepts a short Git branch name, or null to use the repository's default branch.</summary>
+    public static bool IsRepositoryBaseBranch(string? value) =>
+        value is null ||
+        value is { Length: > 0 and <= 255 } &&
+        value is not ("HEAD" or "@") &&
+        !value.StartsWith('-') &&
+        !value.StartsWith("refs/", StringComparison.Ordinal) &&
+        !value.EndsWith('.') &&
+        !value.Contains("..", StringComparison.Ordinal) &&
+        !value.Contains("@{", StringComparison.Ordinal) &&
+        !value.Any(c => char.IsWhiteSpace(c) || char.IsControl(c) || "~^:?*[\\".Contains(c)) &&
+        value.Split('/').All(part => part.Length > 0 && !part.StartsWith('.') &&
+            !part.EndsWith(".lock", StringComparison.Ordinal));
+
+    /// <summary>Checks whether a repository URL points to a local file source.</summary>
     public static bool IsLocalFileRepositoryUrl(string? value) =>
         IsRepositoryUrl(value) &&
         Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
@@ -711,7 +752,7 @@ public static class InputRules
                         throw new InvalidDataException($"The implementation patch must provide text content for '{file.Path}'.");
                     }
                     totalLength += file.Content.Length;
-                    if (file.Content.Length > MaximumRepositoryFileLength * 2 ||
+                    if (file.Content.Length > MaximumCodeChangeFileLength ||
                         totalLength > MaximumCodeChangeContentLength)
                     {
                         throw new InvalidDataException("The implementation patch exceeds its file or total content limit.");
@@ -801,7 +842,8 @@ public static class InputRules
             synthesis.Conflicts is not { Length: <= 30 } ||
             synthesis.UnresolvedQuestions is not { Length: <= 30 })
         {
-            throw new InvalidDataException("Collaboration synthesis must contain bounded summary and finding lists.");
+            throw new InvalidDataException(
+                "Collaboration synthesis summary must be nonempty and at most 4000 characters; agreements, conflicts, and unresolvedQuestions must each be arrays of at most 30 entries.");
         }
 
         static bool ValidSources(

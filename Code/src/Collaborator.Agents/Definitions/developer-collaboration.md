@@ -12,6 +12,12 @@ Return one JSON object with:
   choose a winner or hide the disagreement.
 - `unresolvedQuestions`: decisions or missing evidence that humans should resolve.
 
+Keep the summary nonempty and at most 4000 characters. Each finding list must
+contain at most 30 entries; use empty arrays rather than null. Each finding or
+question must be nonempty and at most 2000 characters. Each sources array must
+contain at most 50 distinct captured skill references. With only one captured
+skill, agreements and conflicts must be empty because they require two sources.
+
 For every agreement or conflict, list the exact `roleId`, `domain`, `skillId`, and
 `revision` of each source in `sources`. For each unresolved question, cite the
 source revisions that raised it; use an empty source list only when it is a new
@@ -22,3 +28,9 @@ Keep unresolved conflicts visible. Do not treat one role as more authoritative
 than another, and do not make approval or implementation decisions. The planner
 will receive this synthesis together with every original analysis. Humans review
 both before approving the plan.
+
+When read-only repository tools are available, use literal or regular-expression
+search to inspect relevant source if it helps explain a conflict or missing
+evidence. Keep the original
+specialist findings visible and do not use repository evidence to silently
+overrule a role's analysis.

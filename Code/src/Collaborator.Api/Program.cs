@@ -190,17 +190,19 @@ api.MapPost("/products", async (ProductRegistration request, CollaboratorDb db, 
 {
     if (!InputRules.IsProductId(request.Id) || !InputRules.IsText(request.Name, 200) ||
         !InputRules.IsText(request.Brief) ||
-        (request.RepositoryUrl is not null && !InputRules.IsLocalFileRepositoryUrl(request.RepositoryUrl)))
+        (request.RepositoryUrl is not null && !InputRules.IsRepositoryUrl(request.RepositoryUrl)) ||
+        !InputRules.IsRepositoryBaseBranch(request.RepositoryBaseBranch))
     {
         return Results.Problem(statusCode: 400,
-            title: "A lowercase product ID, name, and bounded brief are required; repository inspection currently supports local file:// Git URLs only.");
+            title: "A lowercase product ID, name, and bounded brief are required; use an HTTPS, SSH, or local file Git URL without embedded secrets and a valid short base branch name.");
     }
     db.Products.Add(new Product
     {
         Id = request.Id,
         Name = request.Name.Trim(),
         Brief = request.Brief.Trim(),
-        RepositoryUrl = request.RepositoryUrl?.Trim()
+        RepositoryUrl = request.RepositoryUrl?.Trim(),
+        RepositoryBaseBranch = request.RepositoryBaseBranch
     });
     try
     {
@@ -215,23 +217,32 @@ api.MapPost("/products", async (ProductRegistration request, CollaboratorDb db, 
 api.MapPut("/products/{id}/repository", async (
     string id, RepositorySourceUpdate request, CollaboratorDb db, CancellationToken ct) =>
 {
-    if (request.RepositoryUrl is not null && !InputRules.IsLocalFileRepositoryUrl(request.RepositoryUrl))
+    if ((request.RepositoryUrl is not null && !InputRules.IsRepositoryUrl(request.RepositoryUrl)) ||
+        !InputRules.IsRepositoryBaseBranch(request.RepositoryBaseBranch))
     {
         return Results.Problem(statusCode: 400,
-            title: "Repository inspection currently supports local file:// Git URLs only.");
+            title: "Use an HTTPS, SSH, or local file Git URL without embedded secrets and a valid short base branch name.");
     }
     var product = await db.Products.SingleOrDefaultAsync(x => x.Id == id, ct);
     if (product is null)
     {
         return Results.NotFound();
     }
-    product.RepositoryUrl = request.RepositoryUrl?.Trim();
+    var repositoryUrl = request.RepositoryUrl?.Trim();
+    if (product.RepositoryUrl != repositoryUrl || product.RepositoryBaseBranch != request.RepositoryBaseBranch)
+    {
+        product.RepositoryCatalogCommit = null;
+        product.RepositoryCatalogJson = null;
+        product.RepositoryCatalogUpdatedAt = null;
+    }
+    product.RepositoryUrl = repositoryUrl;
+    product.RepositoryBaseBranch = request.RepositoryBaseBranch;
     await db.SaveChangesAsync(ct);
     return Results.NoContent();
 });
 api.MapGet("/products/{id}", async (string id, CollaboratorDb db, CancellationToken ct) =>
     await db.Products.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct) is { } product
-        ? Results.Ok(new { product.Id, product.Name, product.Brief, product.RepositoryUrl })
+        ? Results.Ok(new { product.Id, product.Name, product.Brief, product.RepositoryUrl, product.RepositoryBaseBranch })
         : Results.NotFound());
 api.MapGet("/products/{id}/repository-catalog", async (
     string id, CollaboratorDb db, CancellationToken ct) =>
@@ -240,6 +251,7 @@ api.MapGet("/products/{id}/repository-catalog", async (
         {
             product.Id,
             product.RepositoryUrl,
+            product.RepositoryBaseBranch,
             commit = product.RepositoryCatalogCommit,
             product.RepositoryCatalogUpdatedAt,
             catalog = product.RepositoryCatalogJson is null
@@ -317,15 +329,17 @@ api.MapPost("/products/{id}/feature-requests", async (
         return Results.Problem(statusCode: 409,
             title: "Configure at least one enabled developer-* skill before submitting a feature request.");
     }
-    if (!InputRules.IsLocalFileRepositoryUrl(product.RepositoryUrl))
+    if (!InputRules.IsRepositoryUrl(product.RepositoryUrl) ||
+        !InputRules.IsRepositoryBaseBranch(product.RepositoryBaseBranch))
     {
         return Results.Problem(statusCode: 409,
-            title: "Configure a local file:// Git repository before submitting a feature request.");
+            title: "Configure an HTTPS, SSH, or local file Git repository and a valid base branch before submitting a feature request.");
     }
     var run = new FeatureRun
     {
         Id = Guid.NewGuid(), ProductId = id, Text = text,
         ProductBrief = product.Brief, IdempotencyKey = key, RepositoryUrl = product.RepositoryUrl,
+        RepositoryBaseBranch = product.RepositoryBaseBranch,
         BusinessAnalystId = analystId,
         BusinessAnalystSkillId = skill.SkillId,
         BusinessAnalystSkillName = skillRevision.Name,
@@ -379,7 +393,7 @@ api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, CancellationTok
         developerSkillCount = JsonSerializer.Deserialize<DeveloperSkillSnapshot[]>(
             run.DeveloperSkillsJson, JsonSerializerOptions.Web)?.Length ?? 0,
         run.PlanRevision, run.Decision, run.DecisionComment, run.FailureCode,
-        run.RepositoryCommit,
+        run.RepositoryCommit, run.RepositoryUrl, run.RepositoryBaseBranch,
         repositoryCatalog = run.RepositoryCatalogJson is null
             ? null
             : JsonSerializer.Deserialize<RepositoryCatalog>(run.RepositoryCatalogJson, JsonSerializerOptions.Web),

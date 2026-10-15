@@ -39,6 +39,10 @@ public sealed class FoundationTests
         Assert.AreEqual("jsonb",
             model.FindEntityType(typeof(WorkflowArtifactRecord))!
                 .FindProperty(nameof(WorkflowArtifactRecord.SkillRevisionsJson))!.GetColumnType());
+        Assert.IsTrue(model.FindEntityType(typeof(Product))!
+            .FindProperty(nameof(Product.RepositoryBaseBranch))!.IsNullable);
+        Assert.IsTrue(model.FindEntityType(typeof(FeatureRun))!
+            .FindProperty(nameof(FeatureRun.RepositoryBaseBranch))!.IsNullable);
 
         var questionForeignKey = model.FindEntityType(typeof(StageQuestionRecord))?
             .GetForeignKeys()
@@ -151,6 +155,10 @@ public sealed class FoundationTests
     [DataRow("file:///H:/src/collaborator-sample-app-remote.git", true)]
     [DataRow("https://github.com/example/project.git", true)]
     [DataRow("ssh://github.com/example/project.git", true)]
+    [DataRow("ssh://git@github.com/example/project.git", true)]
+    [DataRow("ssh://git:secret@github.com/example/project.git", false)]
+    [DataRow("file://server/share/project.git", false)]
+    [DataRow("https://example.com/project.git\n", false)]
     [DataRow("https://user:token@example.com/project.git", false)]
     [DataRow("https://example.com/project.git?token=secret", false)]
     [DataRow("relative/path.git", false)]
@@ -163,8 +171,33 @@ public sealed class FoundationTests
     [DataRow("https://github.com/example/project.git", false)]
     [DataRow("ssh://github.com/example/project.git", false)]
     [DataRow("file://server/share/project.git", false)]
-    public void RepositoryInspectionRequiresLocalFileUrl(string url, bool expected) =>
+    public void LocalFileRepositoryValidation(string url, bool expected) =>
         Assert.AreEqual(expected, InputRules.IsLocalFileRepositoryUrl(url));
+
+    [TestMethod]
+    [DataRow(null, true)]
+    [DataRow("main", true)]
+    [DataRow("master", true)]
+    [DataRow("release/stable", true)]
+    [DataRow("", false)]
+    [DataRow("HEAD", false)]
+    [DataRow("@", false)]
+    [DataRow("--upload-pack=command", false)]
+    [DataRow("refs/heads/main", false)]
+    [DataRow("main~1", false)]
+    [DataRow("main^", false)]
+    [DataRow("main:other", false)]
+    [DataRow("main..other", false)]
+    [DataRow("main@{1}", false)]
+    [DataRow("main.lock", false)]
+    [DataRow("main/.hidden", false)]
+    [DataRow("main//other", false)]
+    [DataRow("main/", false)]
+    [DataRow("main.", false)]
+    [DataRow("main other", false)]
+    [DataRow("main\n", false)]
+    public void RepositoryBaseBranchValidation(string? branch, bool expected) =>
+        Assert.AreEqual(expected, InputRules.IsRepositoryBaseBranch(branch));
 
     [TestMethod]
     public void RepositoryCatalogRejectsLocationsOutsideInspectedFiles()
@@ -200,14 +233,86 @@ public sealed class FoundationTests
 
         var paths = JsonSerializer.Deserialize<string[]>(tools.ListSourceFiles());
         var matches = JsonSerializer.Deserialize<JsonElement[]>(tools.SearchSourceCode("taskservice", 5));
+        var regexMatches = JsonSerializer.Deserialize<JsonElement[]>(
+            tools.SearchSourceCodeRegex(@"public\s+sealed\s+class\s+TaskService", 5));
 
         CollectionAssert.AreEqual(new[] { "src/Tasks.cs" }, paths);
         Assert.AreEqual("public sealed class TaskService\n{\n    public void Create() { }\n}\n",
             tools.ReadSourceFile("src/Tasks.cs"));
         Assert.AreEqual("src/Tasks.cs", matches![0].GetProperty("path").GetString());
         Assert.AreEqual(1, matches[0].GetProperty("line").GetInt32());
-        Assert.AreEqual(3, tools.CreateTools().Count);
+        Assert.AreEqual(4, tools.CreateTools().Count);
+        Assert.AreEqual(1, regexMatches!.Length);
+        Assert.AreEqual("src/Tasks.cs", regexMatches[0].GetProperty("path").GetString());
+        Assert.AreEqual(1, regexMatches[0].GetProperty("line").GetInt32());
         Assert.ThrowsExactly<KeyNotFoundException>(() => tools.ReadSourceFile("../outside.cs"));
+        Assert.ThrowsExactly<ArgumentException>(() => tools.SearchSourceCodeRegex("[", 5));
+    }
+
+    [TestMethod]
+    public async Task RepositorySourceTools_ReadsWholeFilesAndSearchesBeyondOldRepositoryLimits()
+    {
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"collaborator-source-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temporaryRoot);
+        try
+        {
+            await RunTestGitAsync(temporaryRoot, "init", "-b", "main");
+            await RunTestGitAsync(temporaryRoot, "config", "user.name", "Collaborator test");
+            await RunTestGitAsync(temporaryRoot, "config", "user.email", "test@localhost");
+            Directory.CreateDirectory(Path.Combine(temporaryRoot, ".github", "workflows"));
+            await File.WriteAllTextAsync(
+                Path.Combine(temporaryRoot, ".github", "workflows", "release.yml"),
+                "name: workflow-search-marker\n");
+            Directory.CreateDirectory(Path.Combine(temporaryRoot, "docs"));
+            await File.WriteAllTextAsync(
+                Path.Combine(temporaryRoot, "docs", "large.txt"),
+                new string('x', 20_000) + "\nfull-file-marker\n");
+            for (var index = 0; index < 70; index++)
+            {
+                await File.WriteAllTextAsync(
+                    Path.Combine(temporaryRoot, $"tracked-{index:D2}.txt"), $"tracked file {index}\n");
+            }
+            await RunTestGitAsync(temporaryRoot, "add", "-A");
+            await RunTestGitAsync(temporaryRoot, "commit", "-m", "Repository source fixture");
+            var commit = (await RunTestGitAsync(temporaryRoot, "rev-parse", "HEAD")).Trim();
+            var tree = await RunTestGitAsync(temporaryRoot, "ls-tree", "-r", "--name-only", commit);
+            var paths = tree.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(path => path.TrimEnd('\r'))
+                .ToArray();
+            var tools = new RepositorySourceTools(
+                new RepositorySourceReference(temporaryRoot, commit, paths));
+            var prepared = RepositorySourceTools.PrepareInput(JsonSerializer.Serialize(new
+            {
+                requestedFeature = "Read files only when needed",
+                repositorySource = new RepositorySourceReference(temporaryRoot, commit, paths)
+            }, JsonSerializerOptions.Web));
+
+            var listed = JsonSerializer.Deserialize<string[]>(tools.ListSourceFiles());
+            var matches = JsonSerializer.Deserialize<JsonElement[]>(
+                tools.SearchSourceCode("workflow-search-marker", 5));
+            var regexMatches = JsonSerializer.Deserialize<JsonElement[]>(
+                tools.SearchSourceCodeRegex(@"workflow-search-[a-z]+", 5));
+            var fullContent = tools.ReadSourceFile("docs/large.txt");
+
+            Assert.IsTrue(listed!.Length > 64);
+            CollectionAssert.Contains(listed, ".github/workflows/release.yml");
+            Assert.AreEqual(20_018, fullContent.Length);
+            Assert.Contains("full-file-marker", fullContent);
+            Assert.AreEqual(".github/workflows/release.yml",
+                matches![0].GetProperty("path").GetString());
+            Assert.AreEqual(4, prepared.Tools.Count);
+            Assert.AreEqual(".github/workflows/release.yml",
+                regexMatches![0].GetProperty("path").GetString());
+            Assert.IsFalse(prepared.Prompt.Contains(temporaryRoot, StringComparison.Ordinal));
+            Assert.IsFalse(prepared.Prompt.Contains("tracked-00.txt", StringComparison.Ordinal));
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                DeleteTestDirectory(temporaryRoot);
+            }
+        }
     }
 
     [TestMethod]
@@ -217,23 +322,29 @@ public sealed class FoundationTests
         var input = JsonSerializer.Serialize(new
         {
             requestedFeature = "Add task filtering",
+            implementationWorkspace = Path.Combine(Path.GetTempPath(), "implementation-worktree"),
             sourceFiles = new[] { new RepositoryFileEvidence("src/Tasks.cs", marker) }
         }, JsonSerializerOptions.Web);
 
         var context = RepositorySourceTools.PrepareInput(input);
 
         Assert.IsFalse(context.Prompt.Contains(marker, StringComparison.Ordinal));
-        Assert.AreEqual(3, context.Tools.Count);
+        Assert.AreEqual(4, context.Tools.Count);
         using var prompt = JsonDocument.Parse(context.Prompt);
         Assert.AreEqual("Add task filtering", prompt.RootElement.GetProperty("requestedFeature").GetString());
         Assert.IsFalse(prompt.RootElement.TryGetProperty("sourceFiles", out _));
+        Assert.IsFalse(prompt.RootElement.TryGetProperty("implementationWorkspace", out _));
+        Assert.AreEqual(
+            Path.Combine(Path.GetTempPath(), "implementation-worktree"),
+            context.WorkingDirectory);
     }
 
     [TestMethod]
     [DataRow("../outside.cs")]
     [DataRow("src/appsettings.json")]
     [DataRow("src/client-secret.cs")]
-    [DataRow("src/.hidden.cs")]
+    [DataRow(".env")]
+    [DataRow(".ssh/id_rsa")]
     [DataRow("src/Tasks.lock")]
     public void RepositorySourceTools_RejectsUnsafeOrExcludedPaths(string path) =>
         Assert.ThrowsExactly<InvalidDataException>(() =>
@@ -819,11 +930,22 @@ public sealed class FoundationTests
     }
 
     [TestMethod]
-    public async Task ApprovedCodeChangePublishesOnlyAReviewBranchFromPinnedCommit()
+    [DoNotParallelize]
+    [DataRow(null, "file")]
+    [DataRow("release/stable", "https")]
+    [DataRow("develop", "ssh")]
+    public async Task ApprovedCodeChangePublishesOnlyAReviewBranchFromPinnedCommit(
+        string? configuredBranch, string transport)
     {
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"collaborator-test-{Guid.NewGuid():N}");
         var sourcePath = Path.Combine(temporaryRoot, "source");
         var remotePath = Path.Combine(temporaryRoot, "remote.git");
+        var configCount = Environment.GetEnvironmentVariable("GIT_CONFIG_COUNT");
+        var configIndex = int.Parse(configCount ?? "0", System.Globalization.CultureInfo.InvariantCulture);
+        var configKey = $"GIT_CONFIG_KEY_{configIndex}";
+        var configValue = $"GIT_CONFIG_VALUE_{configIndex}";
+        var previousKey = Environment.GetEnvironmentVariable(configKey);
+        var previousValue = Environment.GetEnvironmentVariable(configValue);
         Directory.CreateDirectory(temporaryRoot);
         try
         {
@@ -832,11 +954,35 @@ public sealed class FoundationTests
             await RunTestGitAsync(sourcePath, "config", "user.name", "Collaborator test");
             await RunTestGitAsync(sourcePath, "config", "user.email", "test@localhost");
             await File.WriteAllTextAsync(Path.Combine(sourcePath, "README.md"), "original\n");
-            await RunTestGitAsync(sourcePath, "add", "--", "README.md");
+            Directory.CreateDirectory(Path.Combine(sourcePath, "docs"));
+            await File.WriteAllTextAsync(Path.Combine(sourcePath, "docs", "remove.md"), "remove this file\n");
+            await RunTestGitAsync(sourcePath, "add", "-A");
             await RunTestGitAsync(sourcePath, "commit", "-m", "Initial");
-            var pinnedCommit = (await RunTestGitAsync(sourcePath, "rev-parse", "HEAD")).Trim();
+            var mainCommit = (await RunTestGitAsync(sourcePath, "rev-parse", "HEAD")).Trim();
+            if (configuredBranch is not null)
+            {
+                await RunTestGitAsync(sourcePath, "checkout", "-b", configuredBranch);
+                await File.WriteAllTextAsync(Path.Combine(sourcePath, "README.md"), "selected base branch\n");
+                await RunTestGitAsync(sourcePath, "commit", "-am", "Selected branch");
+                await RunTestGitAsync(sourcePath, "tag", configuredBranch, mainCommit);
+                await RunTestGitAsync(sourcePath, "checkout", "main");
+            }
+            var pinnedCommit = (await RunTestGitAsync(
+                sourcePath, "rev-parse", $"refs/heads/{configuredBranch ?? "main"}")).Trim();
             await RunTestGitAsync(temporaryRoot, "clone", "--bare", sourcePath, remotePath);
             var repositoryUrl = new Uri(remotePath).AbsoluteUri;
+            if (transport != "file")
+            {
+                var remoteUrl = transport == "https"
+                    ? "https://collaborator-fixture.invalid/repository.git"
+                    : "ssh://git@collaborator-fixture.invalid/repository.git";
+                // Exercise remote URL handling without network access or real credentials.
+                Environment.SetEnvironmentVariable(configKey, $"url.{repositoryUrl}.insteadOf");
+                Environment.SetEnvironmentVariable(configValue, remoteUrl);
+                Environment.SetEnvironmentVariable("GIT_CONFIG_COUNT",
+                    (configIndex + 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                repositoryUrl = remoteUrl;
+            }
 
             var options = new DbContextOptionsBuilder<CollaboratorDb>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -862,8 +1008,7 @@ public sealed class FoundationTests
                 FeatureSpecificationRevision = 1,
                 BusinessAnalystApproved = true,
                 RepositoryUrl = repositoryUrl,
-                RepositoryCommit = pinnedCommit,
-                RepositoryCatalogJson = JsonSerializer.Serialize(catalog, JsonSerializerOptions.Web),
+                RepositoryBaseBranch = configuredBranch,
                 PlanJson = JsonSerializer.Serialize(plan, JsonSerializerOptions.Web),
                 PlanRevision = 1,
                 Decision = PlanDecisionKinds.Approve,
@@ -925,13 +1070,36 @@ public sealed class FoundationTests
 
             var proposal = new CodeChangeProposal("Document the feature.", [
                 new("README.md", CodeFileOperations.Update, "Updated by the generated patch.\n"),
-                new("docs/feature.md", CodeFileOperations.Add, "Review this feature.\n")
+                new("docs/feature.md", CodeFileOperations.Add, "Review this feature.\n"),
+                new("docs/remove.md", CodeFileOperations.Delete, null)
             ]);
             var generator = new RecordingCodeChangeGenerator(proposal);
             var catalogService = new RepositoryCatalogService(
-                db, new UnexpectedCatalogGenerator(), NullLogger<RepositoryCatalogService>.Instance);
+                db, new FixtureCatalogGenerator(catalog.Functionalities), NullLogger<RepositoryCatalogService>.Instance);
             var service = new CodeChangeService(
                 db, generator, catalogService, NullLogger<CodeChangeService>.Instance);
+
+            var run = await db.Runs.SingleAsync(x => x.Id == runId);
+            run.RepositoryBaseBranch = "missing-branch";
+            await db.SaveChangesAsync();
+            await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+                catalogService.GetForRunAsync(runId, CancellationToken.None));
+            Assert.IsNull(run.RepositoryCommit);
+            run.RepositoryBaseBranch = configuredBranch;
+            await db.SaveChangesAsync();
+            var actualCatalog = await catalogService.GetForRunAsync(runId, CancellationToken.None);
+            Assert.AreEqual(pinnedCommit, actualCatalog.Commit);
+            Assert.AreEqual(pinnedCommit, run.RepositoryCommit);
+            string? advancedBaseCommit = null;
+            if (configuredBranch is not null)
+            {
+                await RunTestGitAsync(sourcePath, "checkout", configuredBranch);
+                await File.WriteAllTextAsync(Path.Combine(sourcePath, "README.md"), "branch advanced after pinning\n");
+                await RunTestGitAsync(sourcePath, "commit", "-am", "Advance base after pinning");
+                await RunTestGitAsync(sourcePath, "push", new Uri(remotePath).AbsoluteUri,
+                    $"HEAD:refs/heads/{configuredBranch}");
+                advancedBaseCommit = (await RunTestGitAsync(sourcePath, "rev-parse", "HEAD")).Trim();
+            }
 
             await service.GenerateAsync(runId, CancellationToken.None);
             await service.PrepareBranchAsync(runId, CancellationToken.None);
@@ -948,18 +1116,34 @@ public sealed class FoundationTests
                 "--git-dir", remotePath, "show", $"{refName}:docs/feature.md");
             var baseAddedPath = await RunTestGitAsync(temporaryRoot,
                 "--git-dir", remotePath, "ls-tree", "refs/heads/main", "--", "docs/feature.md");
+            var publishedDeletedPath = await RunTestGitAsync(temporaryRoot,
+                "--git-dir", remotePath, "ls-tree", refName, "--", "docs/remove.md");
             var baseBranch = (await RunTestGitAsync(temporaryRoot,
                 "--git-dir", remotePath, "rev-parse", "refs/heads/main")).Trim();
 
             Assert.AreEqual(CodeChangeStatuses.Ready, change.Status);
             Assert.AreEqual("code_change_ready", updatedRun.Status);
-            Assert.AreEqual(pinnedCommit, baseBranch);
+            Assert.AreEqual(mainCommit, baseBranch);
+            var publishedParent = (await RunTestGitAsync(temporaryRoot,
+                "--git-dir", remotePath, "rev-parse", $"{refName}^")).Trim();
+            Assert.AreEqual(pinnedCommit, publishedParent);
+            if (configuredBranch is not null)
+            {
+                var selectedBranchCommit = (await RunTestGitAsync(temporaryRoot,
+                    "--git-dir", remotePath, "rev-parse", $"refs/heads/{configuredBranch}")).Trim();
+                Assert.AreNotEqual(pinnedCommit, selectedBranchCommit);
+                Assert.AreEqual(advancedBaseCommit, selectedBranchCommit);
+            }
             Assert.AreEqual(change.BranchCommit, remoteCommit);
             Assert.AreEqual("Updated by the generated patch.\n", publishedContent);
             Assert.AreEqual("Review this feature.\n", publishedAddedContent);
             Assert.AreEqual(string.Empty, baseAddedPath);
+            Assert.AreEqual(string.Empty, publishedDeletedPath);
             Assert.AreEqual($"collaborator/feature-{runId:N}", change.BranchName);
             Assert.AreEqual(1, generator.Calls);
+            Assert.AreEqual($"collaborator/feature-{runId:N}", generator.WorktreeBranch);
+            Assert.AreEqual(pinnedCommit, generator.WorktreeBaseCommit);
+            Assert.IsFalse(Directory.Exists(generator.WorkingDirectory));
 
             change.Status = CodeChangeStatuses.BranchPrepared;
             updatedRun.Status = "code_change_generating";
@@ -972,6 +1156,9 @@ public sealed class FoundationTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable("GIT_CONFIG_COUNT", configCount);
+            Environment.SetEnvironmentVariable(configKey, previousKey);
+            Environment.SetEnvironmentVariable(configValue, previousValue);
             if (Directory.Exists(temporaryRoot))
             {
                 DeleteTestDirectory(temporaryRoot);
@@ -1113,21 +1300,24 @@ public sealed class FoundationTests
     {
         var generator = new RecordingGenerator(new DraftPlan(
             "Add task filtering", ["Reuse TaskService in src/tasks.ts."], []));
-        var sourceFiles = new[] { new RepositoryFileEvidence("src/tasks.ts", "class TaskService {}") };
+        var source = new RepositorySourceReference(
+            Path.GetTempPath(),
+            "da420a5846bbca95e4be5b7d9eb7a6f00387536d",
+            ["src/tasks.ts"]);
         var catalog = new RepositoryCatalog(
             "da420a5846bbca95e4be5b7d9eb7a6f00387536d",
             DateTimeOffset.UnixEpoch,
             1,
             [new RepositoryFunctionality("Task service", "Creates tasks.", ["src/tasks.ts"], ["TaskService"])]);
         await new Planner(generator).CreateAsync(
-            "Brief", "Filter tasks", null, null, null, 1, catalog, sourceFiles, CancellationToken.None);
+            "Brief", "Filter tasks", null, null, null, 1, catalog, source, CancellationToken.None);
         using var document = JsonDocument.Parse(generator.Input!);
         var evidence = document.RootElement.GetProperty("repositoryCatalog");
         Assert.AreEqual(catalog.Commit, evidence.GetProperty("commit").GetString());
         Assert.AreEqual("src/tasks.ts",
             evidence.GetProperty("functionalities")[0].GetProperty("paths")[0].GetString());
         Assert.AreEqual("src/tasks.ts",
-            document.RootElement.GetProperty("sourceFiles")[0].GetProperty("path").GetString());
+            document.RootElement.GetProperty("repositorySource").GetProperty("paths")[0].GetString());
     }
 
     [TestMethod]
@@ -1146,7 +1336,7 @@ public sealed class FoundationTests
 
         await new Planner(generator).CreateAsync(
             "Brief", "Export invoices", null, null, null, 1,
-            null, [], CancellationToken.None, analyses);
+            null, null, CancellationToken.None, analyses);
 
         using var input = JsonDocument.Parse(generator.Input!);
         var serializedAnalyses = input.RootElement.GetProperty("specialistAnalyses");
@@ -1181,7 +1371,7 @@ public sealed class FoundationTests
 
         await new Planner(generator).CreateAsync(
             "Brief", "Export invoices", null, null, null, 1,
-            null, [], CancellationToken.None, analyses, synthesis);
+            null, null, CancellationToken.None, analyses, synthesis);
 
         using var input = JsonDocument.Parse(generator.Input!);
         Assert.AreEqual(2, input.RootElement.GetProperty("specialistAnalyses").GetArrayLength());
@@ -1213,14 +1403,21 @@ public sealed class FoundationTests
             [],
             [new CollaborationFinding("Use client-side or server-side filtering.", skills)],
             []));
+        var repositorySource = new RepositorySourceReference(
+            Path.GetTempPath(),
+            "da420a5846bbca95e4be5b7d9eb7a6f00387536d",
+            ["src/Tasks.cs"]);
 
         var result = await new DeveloperCollaborator(generator).SynthesizeAsync(
-            analyses, skills, CancellationToken.None);
+            analyses, skills, CancellationToken.None, repositorySource);
 
         Assert.AreEqual(1, result.Conflicts.Length);
         using var input = JsonDocument.Parse(generator.Input!);
         Assert.AreEqual(2, input.RootElement.GetProperty("specialistAnalyses").GetArrayLength());
         Assert.AreEqual(2, input.RootElement.GetProperty("capturedSkills").GetArrayLength());
+        Assert.AreEqual(
+            repositorySource.Commit,
+            input.RootElement.GetProperty("repositorySource").GetProperty("commit").GetString());
 
         var invalidGenerator = new RecordingCollaborationGenerator(result with
         {
@@ -1238,19 +1435,55 @@ public sealed class FoundationTests
     }
 
     [TestMethod]
-    public async Task BusinessAnalystReceivesBoundedRepositoryEvidence()
+    public void CollaborationSynthesis_EnforcesSummaryAndFindingLimits()
+    {
+        var skills = new[]
+        {
+            new AgentSkillRevisionReference("developer-ui", "ui-analysis", "general", 2),
+            new AgentSkillRevisionReference("developer-backend", "api-analysis", "general", 1)
+        };
+        var captured = skills.ToHashSet();
+        var finding = new CollaborationFinding(new string('f', 2000), skills);
+        var question = new CollaborationQuestion(new string('q', 2000), []);
+        var synthesis = new CollaborationSynthesis(
+            new string('s', 4000),
+            Enumerable.Repeat(finding, 30).ToArray(),
+            Enumerable.Repeat(finding, 30).ToArray(),
+            Enumerable.Repeat(question, 30).ToArray());
+
+        InputRules.ValidateCollaborationSynthesis(synthesis, captured);
+
+        var error = Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidateCollaborationSynthesis(synthesis with { Summary = new string('s', 4001) }, captured));
+        Assert.Contains("4000", error.Message);
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidateCollaborationSynthesis(
+                synthesis with { Agreements = Enumerable.Repeat(finding, 31).ToArray() }, captured));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidateCollaborationSynthesis(
+                synthesis with { Conflicts = Enumerable.Repeat(finding, 31).ToArray() }, captured));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            InputRules.ValidateCollaborationSynthesis(
+                synthesis with { UnresolvedQuestions = Enumerable.Repeat(question, 31).ToArray() }, captured));
+    }
+
+    [TestMethod]
+    public async Task BusinessAnalystReceivesPinnedRepositoryReference()
     {
         var generator = new RecordingFeatureSpecificationGenerator(new FeatureSpecification(
             "Title", "Problem", ["As a user, I want this."], ["It works."], [], [], []));
-        var sourceFiles = new[] { new RepositoryFileEvidence("src/Tasks.cs", "class TaskService {}") };
+        var source = new RepositorySourceReference(
+            Path.GetTempPath(),
+            "da420a5846bbca95e4be5b7d9eb7a6f00387536d",
+            ["src/Tasks.cs"]);
 
         await new BusinessAnalyst(generator).CreateAsync(
             "Brief", "Add filtering", "requirements-analysis", "Analyze requirements.",
-            null, null, 1, CancellationToken.None, sourceFiles);
+            null, null, 1, CancellationToken.None, source);
 
         using var input = JsonDocument.Parse(generator.Input!);
         Assert.AreEqual("src/Tasks.cs",
-            input.RootElement.GetProperty("sourceFiles")[0].GetProperty("path").GetString());
+            input.RootElement.GetProperty("repositorySource").GetProperty("paths")[0].GetString());
     }
 
     [TestMethod]
@@ -1286,10 +1519,12 @@ public sealed class FoundationTests
         }
         */
         const string sourceOnlyMethodName = "RenderLegacyInvoiceArchive_7QK4";
-        var sourceFiles = new[]
+        var repositoryPath = Path.Combine(Path.GetTempPath(), $"collaborator-copilot-source-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(repositoryPath, "src"));
+        try
         {
-            new RepositoryFileEvidence(
-                "src/InvoiceExportService.cs",
+            await File.WriteAllTextAsync(
+                Path.Combine(repositoryPath, "src", "InvoiceExportService.cs"),
                 """
                 internal sealed class InvoiceExportService
                 {
@@ -1298,44 +1533,60 @@ public sealed class FoundationTests
                         return SerializeAsLegacyArchive(invoice);
                     }
                 }
-                """)
-        };
-        var config = new ConfigurationBuilder().AddInMemoryCollection(
-            new Dictionary<string, string?> { ["Agents:Mode"] = "Copilot" }).Build();
-        using var loggerProvider = new CapturingLoggerProvider();
-        using var services = new ServiceCollection()
-            .AddSingleton<IConfiguration>(config)
-            .AddLogging(logging => logging.AddProvider(loggerProvider))
-            .AddPlanner(config).BuildServiceProvider();
-        var planner = services.GetRequiredService<Planner>();
-        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(7));
-        var first = await planner.CreateAsync(
-            "A fictional invoice application.",
-            "Add CSV export for invoices. Before planning, list source files, search for the existing invoice export implementation, and read its matching file. Identify the exact existing export method name and path in a plan step; do not guess.",
-            null, null, null, 1, null, sourceFiles, deadline.Token);
-        InputRules.ValidatePlan(first);
-        var firstPlanJson = JsonSerializer.Serialize(first);
-        Assert.Contains(sourceOnlyMethodName, firstPlanJson,
-            "The plan must identify a symbol available only from the repository tool response.");
-        var toolLogs = loggerProvider.Messages
-            .Where(message => message.Contains("Copilot repository source tool invoked:", StringComparison.Ordinal))
-            .ToArray();
-        foreach (var toolName in new[]
-        {
-            "list_repository_source_files",
-            "search_repository_source",
-            "read_repository_source_file"
-        })
-        {
-            Assert.IsTrue(toolLogs.Any(message => message.Contains(toolName, StringComparison.Ordinal)),
-                $"Expected Copilot to invoke repository tool '{toolName}'.");
-        }
+                """);
+            await RunTestGitAsync(repositoryPath, "init", "-b", "main");
+            await RunTestGitAsync(repositoryPath, "config", "user.name", "Collaborator test");
+            await RunTestGitAsync(repositoryPath, "config", "user.email", "test@localhost");
+            await RunTestGitAsync(repositoryPath, "add", "-A");
+            await RunTestGitAsync(repositoryPath, "commit", "-m", "Copilot repository fixture");
+            var commit = (await RunTestGitAsync(repositoryPath, "rev-parse", "HEAD")).Trim();
+            var source = new RepositorySourceReference(
+                repositoryPath, commit, ["src/InvoiceExportService.cs"]);
 
-        var revised = await planner.CreateAsync(
-            "A fictional invoice application.",
-            "Add CSV export for invoices.", null, first, "Include CSV export.", 2, null, sourceFiles, deadline.Token);
-        InputRules.ValidatePlan(revised);
-        Assert.Contains("csv", JsonSerializer.Serialize(revised).ToLowerInvariant());
+            var config = new ConfigurationBuilder().AddInMemoryCollection(
+                new Dictionary<string, string?> { ["Agents:Mode"] = "Copilot" }).Build();
+            using var loggerProvider = new CapturingLoggerProvider();
+            using var services = new ServiceCollection()
+                .AddSingleton<IConfiguration>(config)
+                .AddLogging(logging => logging.AddProvider(loggerProvider))
+                .AddPlanner(config).BuildServiceProvider();
+            var planner = services.GetRequiredService<Planner>();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(7));
+            var first = await planner.CreateAsync(
+                "A fictional invoice application.",
+                "Add CSV export for invoices. Before planning, list source files, search for the existing invoice export implementation, and read its matching file. Identify the exact existing export method name and path in a plan step; do not guess.",
+                null, null, null, 1, null, source, deadline.Token);
+            InputRules.ValidatePlan(first);
+            var firstPlanJson = JsonSerializer.Serialize(first);
+            Assert.Contains(sourceOnlyMethodName, firstPlanJson,
+                "The plan must identify a symbol available only from the repository tool response.");
+            var toolLogs = loggerProvider.Messages
+                .Where(message => message.Contains("Copilot repository source tool invoked:", StringComparison.Ordinal))
+                .ToArray();
+            foreach (var toolName in new[]
+            {
+                "list_repository_source_files",
+                "search_repository_source",
+                "read_repository_source_file"
+            })
+            {
+                Assert.IsTrue(toolLogs.Any(message => message.Contains(toolName, StringComparison.Ordinal)),
+                    $"Expected Copilot to invoke repository tool '{toolName}'.");
+            }
+
+            var revised = await planner.CreateAsync(
+                "A fictional invoice application.",
+                "Add CSV export for invoices.", null, first, "Include CSV export.", 2, null, source, deadline.Token);
+            InputRules.ValidatePlan(revised);
+            Assert.Contains("csv", JsonSerializer.Serialize(revised).ToLowerInvariant());
+        }
+        finally
+        {
+            if (Directory.Exists(repositoryPath))
+            {
+                DeleteTestDirectory(repositoryPath);
+            }
+        }
     }
 
     private sealed class CapturingLoggerProvider : ILoggerProvider
@@ -1406,11 +1657,37 @@ public sealed class FoundationTests
     private sealed class RecordingCodeChangeGenerator(CodeChangeProposal result) : ICodeChangeGenerator
     {
         public int Calls { get; private set; }
+        public string? WorkingDirectory { get; private set; }
+        public string? WorktreeBranch { get; private set; }
+        public string? WorktreeBaseCommit { get; private set; }
 
-        public Task<CodeChangeProposal> GenerateCodeChangeAsync(string input, CancellationToken cancellationToken)
+        public async Task<string> GenerateCodeChangeAsync(string input, CancellationToken cancellationToken)
         {
             Calls++;
-            return Task.FromResult(result);
+            using var document = JsonDocument.Parse(input);
+            var workingDirectory = document.RootElement.GetProperty("implementationWorkspace").GetString()
+                ?? throw new InvalidDataException("The implementation worktree path was not provided.");
+            WorkingDirectory = workingDirectory;
+            WorktreeBranch = (await RunTestGitAsync(workingDirectory, "branch", "--show-current")).Trim();
+            WorktreeBaseCommit = (await RunTestGitAsync(workingDirectory, "rev-parse", "HEAD")).Trim();
+            foreach (var file in result.Files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var path = Path.Combine(
+                    workingDirectory,
+                    file.Path.Replace('/', Path.DirectorySeparatorChar));
+                if (file.Operation == CodeFileOperations.Delete)
+                {
+                    File.Delete(path);
+                    continue;
+                }
+
+                var directory = Path.GetDirectoryName(path)
+                    ?? throw new InvalidDataException("The test file path has no parent directory.");
+                Directory.CreateDirectory(directory);
+                await File.WriteAllTextAsync(path, file.Content!, cancellationToken);
+            }
+            return result.Summary;
         }
     }
 
@@ -1419,6 +1696,12 @@ public sealed class FoundationTests
         public Task<RepositoryFunctionality[]> GenerateCatalogAsync(
             string input, CancellationToken cancellationToken) =>
             throw new AssertFailedException("The pre-pinned catalog should prevent catalog generation.");
+    }
+
+    private sealed class FixtureCatalogGenerator(RepositoryFunctionality[] functionalities) : IRepositoryCatalogGenerator
+    {
+        public Task<RepositoryFunctionality[]> GenerateCatalogAsync(
+            string input, CancellationToken cancellationToken) => Task.FromResult(functionalities);
     }
 
     private static async Task<string> RunTestGitAsync(string workingDirectory, params string[] arguments)
@@ -1435,6 +1718,12 @@ public sealed class FoundationTests
                 CreateNoWindow = true
             }
         };
+        process.StartInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        process.StartInfo.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        process.StartInfo.Environment["GIT_CONFIG_GLOBAL"] =
+            Path.Combine(workingDirectory, ".collaborator-test-gitconfig");
+        process.StartInfo.ArgumentList.Add("-c");
+        process.StartInfo.ArgumentList.Add("commit.gpgsign=false");
         foreach (var argument in arguments)
         {
             process.StartInfo.ArgumentList.Add(argument);
@@ -1443,9 +1732,24 @@ public sealed class FoundationTests
         {
             throw new InvalidOperationException("Unable to start Git in the integration test.");
         }
-        var output = await process.StandardOutput.ReadToEndAsync();
-        var error = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            await Task.WhenAll(outputTask, errorTask);
+            throw new TimeoutException(
+                $"Git command '{string.Join(' ', arguments)}' exceeded the 30-second test limit.");
+        }
+        await Task.WhenAll(outputTask, errorTask);
+        var output = outputTask.Result;
+        var error = errorTask.Result;
         Assert.AreEqual(0, process.ExitCode, error);
         return output;
     }

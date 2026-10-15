@@ -14,7 +14,9 @@ internal sealed record RunView(
     FeatureSpecification? FeatureSpecification,
     int PlanRevision, string? Decision, string? DecisionComment,
     string? FailureCode, string? RepositoryCommit, RepositoryCatalog? RepositoryCatalog, DraftPlan? Plan,
-    CodeChangeStatus? CodeChange);
+    CodeChangeStatus? CodeChange,
+    string? RepositoryUrl = null,
+    string? RepositoryBaseBranch = null);
 
 internal sealed record RunEventView(long Id, Guid RunId, string Kind, string Actor, DateTimeOffset CreatedAt);
 
@@ -117,10 +119,10 @@ internal sealed class CollaboratorApi(HttpClient http, Action<string>? trace)
             request, null, ct);
 
     public Task<ApiResult<JsonElement>> UpdateProductRepositoryAsync(
-        string productId, string? repositoryUrl, CancellationToken ct) =>
+        string productId, string? repositoryUrl, CancellationToken ct, string? repositoryBaseBranch = null) =>
         SendAsync<JsonElement>(HttpMethod.Put,
             $"/api/v1/products/{Uri.EscapeDataString(productId)}/repository",
-            new RepositorySourceUpdate(repositoryUrl), null, ct);
+            new RepositorySourceUpdate(repositoryUrl, repositoryBaseBranch), null, ct);
 
     public Task<ApiResult<SubmissionView>> SubmitFeatureAsync(
         string productId, string text, string idempotencyKey, string businessAnalystId,

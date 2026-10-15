@@ -2,49 +2,53 @@ using Collaborator.Core;
 using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace Collaborator.Agents;
 
-/// <summary>Provides bounded, read-only tools over source files from one pinned repository snapshot.</summary>
+/// <summary>Provides validated tools over eligible files at one pinned Git commit.</summary>
 public sealed class RepositorySourceTools
 {
     private const int MaximumSearchQueryLength = 200;
     private const int MaximumSearchResults = 30;
-    private const int MaximumExcerptLength = 300;
-    private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".cs", ".csproj", ".css", ".go", ".html", ".java", ".js", ".jsx",
-        ".md", ".py", ".rs", ".sql", ".ts", ".tsx"
-    };
+    private const int SearchBatchSize = 100;
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromMilliseconds(100);
     private static readonly HashSet<string> ExcludedDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".git", ".vs", "bin", "build", "dist", "node_modules", "obj", "packages", "vendor"
+        ".git", ".vs", ".aws", ".azure", ".ssh", "bin", "build", "dist",
+        "node_modules", "obj", "packages", "vendor"
     };
-    private readonly IReadOnlyDictionary<string, string> files;
+    private static readonly HashSet<string> BinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".7z", ".a", ".apk", ".avif", ".bmp", ".class", ".db", ".dll", ".doc",
+        ".docx", ".dylib", ".eot", ".exe", ".gif", ".gz", ".ico", ".jar",
+        ".jpeg", ".jpg", ".lib", ".mp3", ".mp4", ".o", ".obj", ".pdf", ".pdb",
+        ".cer", ".crt", ".der", ".key", ".p12", ".p7b", ".p7c", ".p7s", ".pem",
+        ".pfx", ".png", ".ppt", ".pptx", ".pyc", ".so", ".sqlite", ".tar",
+        ".tif", ".tiff", ".ttf", ".wasm", ".webp", ".woff", ".woff2", ".xls",
+        ".xlsx", ".zip"
+    };
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private readonly IReadOnlyDictionary<string, string>? inMemoryFiles;
+    private readonly RepositorySourceReference? source;
+    private readonly string[] originalPaths;
 
-    /// <summary>Initializes tools from validated repository evidence.</summary>
-    /// <param name="sourceFiles">Eligible files read from the run's pinned Git commit.</param>
-    /// <exception cref="InvalidDataException">The evidence exceeds configured bounds or has unsafe paths.</exception>
+    /// <summary>Initializes tools from evidence, primarily for offline providers and tests.</summary>
     public RepositorySourceTools(IEnumerable<RepositoryFileEvidence> sourceFiles)
     {
         ArgumentNullException.ThrowIfNull(sourceFiles);
         var materialized = new Dictionary<string, string>(StringComparer.Ordinal);
-        var totalLength = 0;
         foreach (var file in sourceFiles)
         {
-            if (file is null || !IsSafeSnapshotPath(file.Path) || file.Content is null ||
-                file.Content.Contains('\0') || file.Content.Length > InputRules.MaximumRepositoryFileLength ||
-                !materialized.TryAdd(file.Path, file.Content))
+            if (file is null || !IsEligibleSourcePath(file.Path) || file.Content is null ||
+                file.Content.Contains('\0') || !materialized.TryAdd(file.Path, file.Content))
             {
                 throw new InvalidDataException("Repository source evidence contains an invalid or duplicate file.");
-            }
-            totalLength += file.Content.Length;
-            if (materialized.Count > InputRules.MaximumRepositoryFiles ||
-                totalLength > InputRules.MaximumRepositoryContentLength)
-            {
-                throw new InvalidDataException("Repository source evidence exceeds the configured analysis limits.");
             }
         }
         if (materialized.Count == 0)
@@ -52,51 +56,79 @@ public sealed class RepositorySourceTools
             throw new InvalidDataException("Repository source evidence is empty.");
         }
 
-        files = materialized;
+        inMemoryFiles = materialized;
+        originalPaths = materialized.Keys.Order(StringComparer.Ordinal).ToArray();
     }
 
-    /// <summary>Creates Copilot SDK declarations for the snapshot's read-only operations.</summary>
-    /// <returns>The list, search, and exact-file-read functions available to the model.</returns>
-    public ICollection<AIFunctionDeclaration> CreateTools() =>
-    [
-        CopilotTool.DefineTool(
-            () => ListSourceFiles(),
-            toolOptions: new CopilotToolOptions { SkipPermission = true },
-            factoryOptions: new AIFunctionFactoryOptions
-            {
-                Name = "list_repository_source_files",
-                Description = "List eligible source and documentation paths in this run's pinned Git snapshot."
-            }),
-        CopilotTool.DefineTool(
-            ([Description("Case-insensitive text to find in source lines; 1 to 200 characters.")] string query,
-                [Description("Maximum matches to return, from 1 to 30.")] int maxResults) =>
-                SearchSourceCode(query, maxResults),
-            toolOptions: new CopilotToolOptions { SkipPermission = true },
-            factoryOptions: new AIFunctionFactoryOptions
-            {
-                Name = "search_repository_source",
-                Description = "Search eligible source text in this run's pinned Git snapshot."
-            }),
-        CopilotTool.DefineTool(
-            ([Description("Exact repository-relative path returned by the list or search tool.")] string path) =>
-                ReadSourceFile(path),
-            toolOptions: new CopilotToolOptions { SkipPermission = true },
-            factoryOptions: new AIFunctionFactoryOptions
-            {
-                Name = "read_repository_source_file",
-                Description = "Read one exact eligible source file from this run's pinned Git snapshot."
-            })
-    ];
+    /// <summary>Initializes tools that read files only when an agent asks for them.</summary>
+    public RepositorySourceTools(RepositorySourceReference source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (string.IsNullOrWhiteSpace(source.GitDirectory) ||
+            !Directory.Exists(source.GitDirectory) ||
+            !IsCommitId(source.Commit) ||
+            source.Paths is null ||
+            source.Paths.Length == 0 ||
+            source.Paths.Any(path => !IsEligibleSourcePath(path)) ||
+            source.Paths.Distinct(StringComparer.Ordinal).Count() != source.Paths.Length)
+        {
+            throw new InvalidDataException("The pinned repository source reference is invalid.");
+        }
+        this.source = source;
+        originalPaths = source.Paths.Order(StringComparer.Ordinal).ToArray();
+    }
 
-    /// <summary>Returns the eligible repository-relative paths in ordinal order.</summary>
-    public string ListSourceFiles() => JsonSerializer.Serialize(files.Keys.Order(StringComparer.Ordinal));
+    /// <summary>Creates Copilot SDK declarations for read-only repository exploration.</summary>
+    public ICollection<AIFunctionDeclaration> CreateTools()
+    {
+        var tools = new List<AIFunctionDeclaration>
+        {
+            CopilotTool.DefineTool(
+                () => ListSourceFiles(),
+                toolOptions: new CopilotToolOptions { SkipPermission = true },
+                factoryOptions: new AIFunctionFactoryOptions
+                {
+                    Name = "list_repository_source_files",
+                    Description = "List eligible tracked text files in the pinned repository."
+                }),
+            CopilotTool.DefineTool(
+                ([Description("Case-insensitive text to find in source lines; 1 to 200 characters.")] string query,
+                    [Description("Maximum matching lines to return, from 1 to 30.")] int maxResults) =>
+                    SearchSourceCode(query, maxResults),
+                toolOptions: new CopilotToolOptions { SkipPermission = true },
+                factoryOptions: new AIFunctionFactoryOptions
+                {
+                    Name = "search_repository_source",
+                    Description = "Search eligible tracked text files in the pinned repository."
+                }),
+            CopilotTool.DefineTool(
+                ([Description("Case-insensitive .NET regular expression to match against each source line; 1 to 200 characters.")] string pattern,
+                    [Description("Maximum matching lines to return, from 1 to 30.")] int maxResults) =>
+                    SearchSourceCodeRegex(pattern, maxResults),
+                toolOptions: new CopilotToolOptions { SkipPermission = true },
+                factoryOptions: new AIFunctionFactoryOptions
+                {
+                    Name = "search_repository_source_regex",
+                    Description = "Search eligible tracked text files in the pinned repository with a .NET regular expression."
+                }),
+            CopilotTool.DefineTool(
+                ([Description("Exact repository-relative path returned by the list or search tool.")] string path) =>
+                    ReadSourceFile(path),
+                toolOptions: new CopilotToolOptions { SkipPermission = true },
+                factoryOptions: new AIFunctionFactoryOptions
+                {
+                    Name = "read_repository_source_file",
+                    Description = "Read the complete text of one eligible file at the pinned commit."
+                })
+        };
 
-    /// <summary>Searches source lines and returns bounded path, line-number, and excerpt matches.</summary>
-    /// <param name="query">Case-insensitive text to search for.</param>
-    /// <param name="maxResults">Maximum number of matches to return, between 1 and 30.</param>
-    /// <returns>JSON containing matching paths, one-based line numbers, and bounded excerpts.</returns>
-    /// <exception cref="ArgumentException">The query is empty or exceeds the supported length.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">The result limit is outside the supported range.</exception>
+        return tools;
+    }
+
+    /// <summary>Returns eligible repository-relative paths in ordinal order.</summary>
+    public string ListSourceFiles() => JsonSerializer.Serialize(GetCurrentPaths());
+
+    /// <summary>Searches the snapshot and returns matching paths, line numbers, and complete matching lines.</summary>
     public string SearchSourceCode(string query, int maxResults)
     {
         if (string.IsNullOrWhiteSpace(query) || query.Length > MaximumSearchQueryLength)
@@ -108,68 +140,139 @@ public sealed class RepositorySourceTools
             throw new ArgumentOutOfRangeException(nameof(maxResults), $"Search result limit must be between 1 and {MaximumSearchResults}.");
         }
 
-        var matches = new List<SourceSearchMatch>(Math.Min(maxResults, MaximumSearchResults));
-        foreach (var (path, content) in files.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        if (inMemoryFiles is not null)
         {
-            var lines = content.Split('\n');
-            for (var index = 0; index < lines.Length; index++)
+            var matches = new List<SourceSearchMatch>(Math.Min(maxResults, MaximumSearchResults));
+            foreach (var path in GetCurrentPaths())
             {
-                var line = lines[index].TrimEnd('\r');
-                if (!line.Contains(query, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                matches.Add(new SourceSearchMatch(
-                    path,
-                    index + 1,
-                    line.Length <= MaximumExcerptLength ? line : line[..MaximumExcerptLength]));
+                AddMatches(matches, path, ReadSourceFile(path), query, maxResults);
                 if (matches.Count == maxResults)
                 {
-                    return JsonSerializer.Serialize(matches, JsonSerializerOptions.Web);
+                    break;
+                }
+            }
+            return JsonSerializer.Serialize(matches, Json);
+        }
+
+        var source = this.source
+            ?? throw new InvalidOperationException("Repository source tools have no source.");
+        return JsonSerializer.Serialize(SearchGitSnapshot(source, query, maxResults), Json);
+    }
+
+    /// <summary>Searches every current eligible source line using a bounded, case-insensitive .NET regex.</summary>
+    public string SearchSourceCodeRegex(string pattern, int maxResults)
+    {
+        ValidateSearchLimit(pattern, maxResults);
+        Regex regex;
+        try
+        {
+            regex = new Regex(
+                pattern,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+                RegexMatchTimeout);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ArgumentException("The regular expression is invalid.", nameof(pattern), exception);
+        }
+
+        var matches = new List<SourceSearchMatch>(maxResults);
+        try
+        {
+            foreach (var path in GetCurrentPaths())
+            {
+                AddRegexMatches(matches, path, ReadSourceFile(path), regex, maxResults);
+                if (matches.Count == maxResults)
+                {
+                    break;
                 }
             }
         }
+        catch (RegexMatchTimeoutException exception)
+        {
+            throw new TimeoutException(
+                $"Repository regex search exceeded the {RegexMatchTimeout.TotalMilliseconds:0} ms per-line match limit.",
+                exception);
+        }
 
-        return JsonSerializer.Serialize(matches, JsonSerializerOptions.Web);
+        return JsonSerializer.Serialize(matches, Json);
     }
 
-    /// <summary>Returns content for one exact eligible path in the pinned snapshot.</summary>
-    /// <param name="path">Exact repository-relative file path.</param>
-    /// <returns>The file's bounded text content.</returns>
-    /// <exception cref="KeyNotFoundException">The path is not present in this snapshot.</exception>
+    /// <summary>Returns the complete content of one exact eligible path in the pinned snapshot.</summary>
     public string ReadSourceFile(string path)
     {
-        if (!IsSafeSnapshotPath(path) || !files.TryGetValue(path, out var content))
+        if (!IsEligibleSourcePath(path))
         {
             throw new KeyNotFoundException("The requested path is not an eligible file in this repository snapshot.");
+        }
+
+        if (Array.BinarySearch(originalPaths, path, StringComparer.Ordinal) < 0)
+        {
+            throw new KeyNotFoundException("The requested path is not an eligible file in this repository snapshot.");
+        }
+
+        return ReadOriginalSourceFile(path);
+    }
+
+    private string ReadOriginalSourceFile(string path)
+    {
+        var content = inMemoryFiles is not null
+            ? inMemoryFiles[path]
+            : ReadGitFile(source
+                ?? throw new InvalidOperationException("Repository source tools have no source."), path);
+        if (content.Contains('\0'))
+        {
+            throw new InvalidDataException("The requested repository file is binary, not text.");
         }
         return content;
     }
 
-    /// <summary>Creates tools from source evidence and removes the evidence from the prompt payload.</summary>
-    /// <param name="input">Serialized provider input, optionally containing sourceFiles.</param>
-    /// <returns>A prompt without raw source text and tools bound to the supplied snapshot.</returns>
+    /// <summary>Creates read-only repository tools and removes internal paths and source metadata from the prompt.</summary>
     public static RepositoryToolContext PrepareInput(string input)
     {
         var root = JsonNode.Parse(input)?.AsObject()
             ?? throw new InvalidDataException("Copilot provider input must be a JSON object.");
-        if (!root.TryGetPropertyValue("sourceFiles", out var sourceEvidence) || sourceEvidence is null)
+        string? workingDirectory = null;
+        if (root.TryGetPropertyValue("implementationWorkspace", out var workspaceNode))
         {
-            return new RepositoryToolContext(input, []);
+            workingDirectory = workspaceNode?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(workingDirectory))
+            {
+                throw new InvalidDataException("The implementation worktree path is invalid.");
+            }
+            root.Remove("implementationWorkspace");
+        }
+        if (root.TryGetPropertyValue("repositorySource", out var repositorySource))
+        {
+            root.Remove("repositorySource");
+            if (repositorySource is not null)
+            {
+                var source = repositorySource.Deserialize<RepositorySourceReference>(Json)
+                    ?? throw new InvalidDataException("The pinned repository source reference is invalid.");
+                var sourceTools = new RepositorySourceTools(source);
+                return new RepositoryToolContext(root.ToJsonString(Json), sourceTools, workingDirectory);
+            }
         }
 
-        var files = sourceEvidence.Deserialize<RepositoryFileEvidence[]>(JsonSerializerOptions.Web);
+        if (!root.TryGetPropertyValue("sourceFiles", out var sourceEvidence) || sourceEvidence is null)
+        {
+            return new RepositoryToolContext(root.ToJsonString(Json), null, workingDirectory);
+        }
+
+        var files = sourceEvidence.Deserialize<RepositoryFileEvidence[]>(Json);
         if (files is null || files.Length == 0)
         {
             throw new InvalidDataException("Repository source evidence is empty or invalid.");
         }
         root.Remove("sourceFiles");
-        return new RepositoryToolContext(
-            root.ToJsonString(JsonSerializerOptions.Web),
-            new RepositorySourceTools(files).CreateTools());
+        var evidenceTools = new RepositorySourceTools(files);
+        return new RepositoryToolContext(root.ToJsonString(Json), evidenceTools, workingDirectory);
     }
 
-    private static bool IsSafeSnapshotPath(string? path)
+    private string[] GetCurrentPaths() => originalPaths;
+
+    /// <summary>Checks paths while excluding secrets, generated output, and known binary file types.</summary>
+    public static bool IsEligibleSourcePath(string? path)
     {
         if (path is not { Length: > 0 and <= 240 } ||
             path.StartsWith('/') ||
@@ -181,24 +284,183 @@ public sealed class RepositorySourceTools
 
         var segments = path.Split('/');
         if (segments.Any(segment => segment.Length == 0 || segment is "." or ".." ||
-            segment.StartsWith(".", StringComparison.Ordinal) || segment.Contains(':') ||
-            ExcludedDirectories.Contains(segment)))
+            segment.Contains(':') || ExcludedDirectories.Contains(segment)))
         {
             return false;
         }
 
         var fileName = segments[^1];
-        return !fileName.StartsWith(".env", StringComparison.OrdinalIgnoreCase) &&
-            !fileName.Contains("secret", StringComparison.OrdinalIgnoreCase) &&
-            !fileName.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) &&
-            !fileName.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) &&
-            SourceExtensions.Contains(Path.GetExtension(fileName));
+        if (fileName.StartsWith(".env", StringComparison.OrdinalIgnoreCase) ||
+            fileName.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+            fileName.Contains("credential", StringComparison.OrdinalIgnoreCase) ||
+            fileName.Contains("private-key", StringComparison.OrdinalIgnoreCase) ||
+            fileName is ".npmrc" or ".pypirc" or ".netrc" or ".dockercfg" or
+                "id_rsa" or "id_ed25519" or "credentials" or "credentials.json" or
+                ".ds_store" or "thumbs.db" ||
+            fileName.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) ||
+            fileName.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
+            BinaryExtensions.Contains(Path.GetExtension(fileName)))
+        {
+            return false;
+        }
+        return true;
     }
+
+    private static void AddMatches(
+        ICollection<SourceSearchMatch> matches, string path, string content, string query, int maxResults)
+    {
+        var lines = content.Split('\n');
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var line = lines[index].TrimEnd('\r');
+            if (!line.Contains(query, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            matches.Add(new SourceSearchMatch(path, index + 1, line));
+            if (matches.Count == maxResults)
+            {
+                return;
+            }
+        }
+    }
+
+    private static void AddRegexMatches(
+        ICollection<SourceSearchMatch> matches,
+        string path,
+        string content,
+        Regex regex,
+        int maxResults)
+    {
+        var lines = content.Split('\n');
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var line = lines[index].TrimEnd('\r');
+            if (!regex.IsMatch(line))
+            {
+                continue;
+            }
+            matches.Add(new SourceSearchMatch(path, index + 1, line));
+            if (matches.Count == maxResults)
+            {
+                return;
+            }
+        }
+    }
+
+    private static void ValidateSearchLimit(string pattern, int maxResults)
+    {
+        if (string.IsNullOrWhiteSpace(pattern) || pattern.Length > MaximumSearchQueryLength)
+        {
+            throw new ArgumentException(
+                $"Search pattern must contain 1 to {MaximumSearchQueryLength} characters.",
+                nameof(pattern));
+        }
+        if (maxResults is < 1 or > MaximumSearchResults)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxResults),
+                $"Search result limit must be between 1 and {MaximumSearchResults}.");
+        }
+    }
+
+    private static List<SourceSearchMatch> SearchGitSnapshot(
+        RepositorySourceReference source, string query, int maxResults, IEnumerable<string>? paths = null)
+    {
+        var matches = new List<SourceSearchMatch>(maxResults);
+        foreach (var batch in (paths ?? source.Paths).Chunk(SearchBatchSize))
+        {
+            var arguments = new List<string>
+            {
+                "grep", "--no-color", "-n", "-I", "-i", "-F", "-m", "1",
+                "-e", query, source.Commit, "--"
+            };
+            arguments.AddRange(batch.Select(path => $":(literal){path}"));
+            var result = RunGit(source.GitDirectory, arguments);
+            if (result.ExitCode is not (0 or 1))
+            {
+                throw new InvalidOperationException($"Git source search failed: {result.Error.Trim()}");
+            }
+            foreach (var rawLine in result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = rawLine.TrimEnd('\r');
+                var pathSeparator = line.IndexOf(':');
+                var numberSeparator = pathSeparator < 0 ? -1 : line.IndexOf(':', pathSeparator + 1);
+                if (pathSeparator <= 0 || numberSeparator <= pathSeparator + 1 ||
+                    !int.TryParse(line.AsSpan(pathSeparator + 1, numberSeparator - pathSeparator - 1),
+                        NumberStyles.None, CultureInfo.InvariantCulture, out var lineNumber))
+                {
+                    throw new InvalidDataException("Git returned a malformed source-search result.");
+                }
+                matches.Add(new SourceSearchMatch(
+                    line[..pathSeparator], lineNumber, line[(numberSeparator + 1)..]));
+                if (matches.Count == maxResults)
+                {
+                    return matches;
+                }
+            }
+        }
+        return matches;
+    }
+
+    private static string ReadGitFile(RepositorySourceReference source, string path)
+    {
+        var result = RunGit(source.GitDirectory, ["show", $"{source.Commit}:{path}"]);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Git could not read '{path}': {result.Error.Trim()}");
+        }
+        return result.Output;
+    }
+
+    private static (int ExitCode, string Output, string Error) RunGit(
+        string workingDirectory, IReadOnlyList<string> arguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            }
+        };
+        foreach (var argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("Unable to start Git for repository source access.");
+        }
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit((int)TimeSpan.FromMinutes(2).TotalMilliseconds))
+        {
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+            Task.WaitAll(outputTask, errorTask);
+            throw new TimeoutException("Repository source search or file read exceeded two minutes.");
+        }
+        Task.WaitAll(outputTask, errorTask);
+        return (process.ExitCode, outputTask.Result, errorTask.Result);
+    }
+
+    private static bool IsCommitId(string commit) =>
+        commit.Length is 40 or 64 && commit.All(Uri.IsHexDigit);
 
     private sealed record SourceSearchMatch(string Path, int Line, string Excerpt);
 }
 
-/// <summary>Prepared prompt and source-reading tools for one Copilot session.</summary>
-/// <param name="Prompt">Serialized provider input with raw repository source removed.</param>
-/// <param name="Tools">Read-only source tools bound to the removed evidence.</param>
-public sealed record RepositoryToolContext(string Prompt, ICollection<AIFunctionDeclaration> Tools);
+/// <summary>Prepared prompt, read-only repository tools, and optional implementation worktree.</summary>
+public sealed record RepositoryToolContext(
+    string Prompt, RepositorySourceTools? SourceTools, string? WorkingDirectory = null)
+{
+    public ICollection<AIFunctionDeclaration> Tools { get; } = SourceTools?.CreateTools() ?? [];
+}
