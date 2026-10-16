@@ -1,6 +1,34 @@
 {
   "version": "0.2.0",
+  "compounds": [
+    {
+      "name": "Collaborator: AppHost + Vue",
+      "preLaunchTask": "Collaborator: stop existing AppHost",
+      "configurations": [
+        "Collaborator: Aspire extension (debug all services)",
+        "Collaborator: Vue (Vite + Edge)"
+      ],
+      "stopAll": false
+    }
+  ],
   "configurations": [
+    {
+      "name": "Collaborator: Vue (Vite + Edge)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev -- --port 5173 --strictPort",
+      "cwd": "${workspaceFolder}/Code/src/Collaborator.Web",
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "serverReadyAction": {
+        "pattern": "Local:\\s+(http://127\\.0\\.0\\.1:5173/)",
+        "uriFormat": "%s",
+        "action": "debugWithEdge",
+        "webRoot": "${workspaceFolder}/Code/src/Collaborator.Web",
+        "killOnServerStop": true
+      }
+    },
     {
       "name": "Collaborator: Aspire extension (debug all services)",
       "type": "aspire",

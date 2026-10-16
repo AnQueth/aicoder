@@ -2,6 +2,44 @@
 @apiKey = {{$dotenv COLLABORATOR_API_KEY}}
 @runId = 00000000-0000-0000-0000-000000000000
 
+### Browse products (bounded pages, ordered by ID)
+GET {{baseUrl}}/api/v1/products?offset=0&limit=50
+X-Api-Key: {{apiKey}}
+
+### List human developer implementation inputs and confirmation progress
+GET {{baseUrl}}/api/v1/runs/{{runId}}/developer-proposals
+X-Api-Key: {{apiKey}}
+
+### Confirm a developer implementation proposal for an open round
+POST {{baseUrl}}/api/v1/runs/{{runId}}/developer-proposals/developer-1
+X-Api-Key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "revision": 1,
+  "proposal": "Reuse the existing export service and add Unicode integration tests.",
+  "noAdditionalInput": false
+}
+
+### Explicitly confirm no additional implementation input
+POST {{baseUrl}}/api/v1/runs/{{runId}}/developer-proposals/developer-2
+X-Api-Key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "revision": 1,
+  "proposal": null,
+  "noAdditionalInput": true
+}
+
+### Browse feature runs (newest first)
+GET {{baseUrl}}/api/v1/runs?offset=0&limit=50
+X-Api-Key: {{apiKey}}
+
+### Invalid pagination returns 400 Problem Details
+GET {{baseUrl}}/api/v1/runs?limit=201
+X-Api-Key: {{apiKey}}
+
 ### Get the cross-role synthesis for a run after specialist processing
 GET {{baseUrl}}/api/v1/runs/{{runId}}/collaboration
 X-Api-Key: {{apiKey}}

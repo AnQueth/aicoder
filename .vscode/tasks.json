@@ -2,6 +2,25 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Collaborator: stop existing AppHost",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "tool",
+        "run",
+        "aspire",
+        "--",
+        "stop",
+        "--apphost",
+        "src/Collaborator.AppHost/Collaborator.AppHost.csproj",
+        "--non-interactive"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/Code"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "Collaborator: build API test client",
       "type": "process",
       "command": "dotnet",

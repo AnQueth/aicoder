@@ -28,6 +28,8 @@ internal sealed class ClientOptions
     public List<DeveloperSkillSelection>? DeveloperSkills { get; private set; }
     public Dictionary<string, string> ReviewResponses { get; } = new(StringComparer.Ordinal);
     public List<string> Feedback { get; } = [];
+    public string? PlanningMode { get; private set; }
+    public Dictionary<(int Revision, string UserId), DeveloperProposalSubmission> ImplementationInputs { get; } = [];
     public string? FinalDecision { get; private set; }
     public string? RejectReason { get; private set; }
     public bool Interactive { get; private set; }
@@ -69,6 +71,12 @@ internal sealed class ClientOptions
           --architecture-skill-prompt <text> Create or update the architecture skill prompt
 
         Developer reviews:
+          --planning-mode <mode>      proposals-first or draft-first (new runs only; omitted preserves legacy)
+          --implementation-proposal <revision|id|text>
+                                      Explicit developer implementation input for an exact target plan revision (repeatable)
+          --no-implementation-input <revision|id>
+                                      Explicit no-additional-input confirmation for an exact revision (repeatable)
+                                      Every selected developer must have an input; revisions need fresh flags.
           --specialist <role/domain/skill> Select a configured specialist (repeatable; omitted uses enabled skills)
           --no-specialists            Skip specialist analyses and synthesis for this run
           --reviewer-count <n>         Developers selected for this run (default 3; range 1-10)
@@ -143,6 +151,24 @@ internal sealed class ClientOptions
                 case "--ba-skill-prompt": options.BusinessAnalystSkillPrompt = Next(); break;
                 case "--architecture-skill-prompt": options.ArchitectureSkillPrompt = Next(); break;
                 case "--reviewer-count": options.ReviewerCount = ParsePositive(Next(), arg); break;
+                case "--planning-mode": options.PlanningMode = Next(); break;
+                case "--implementation-proposal":
+                case "--no-implementation-input":
+                    var noInput = arg == "--no-implementation-input";
+                    var input = Next().Split('|', noInput ? 2 : 3);
+                    if (input.Length != (noInput ? 2 : 3) || !int.TryParse(input[0], out var inputRevision) ||
+                        !InputRules.IsText(input[1], 128))
+                    {
+                        throw new ArgumentException($"{arg} requires revision|developer-id{(noInput ? "" : "|proposal")}.");
+                    }
+                    var contribution = new DeveloperProposalSubmission(inputRevision, noInput ? null : input[2], noInput);
+                    if (!DeveloperProposalRules.IsValid(contribution) ||
+                        !options.ImplementationInputs.TryAdd((inputRevision, input[1].Trim()), contribution))
+                    {
+                        throw new ArgumentException("Implementation inputs require a valid revision, unique developer/revision pair, and nonempty proposal of at most 4000 characters or explicit no input.");
+                    }
+                    scripted = true;
+                    break;
                 case "--developer": options.Developers.Add(ParseDeveloper(Next())); break;
                 case "--specialist":
                     if (options.DeveloperSkills is { Count: 0 })
@@ -194,6 +220,18 @@ internal sealed class ClientOptions
         if (options.Quiet && options.Verbose)
         {
             throw new ArgumentException("--quiet and --verbose cannot be combined.");
+        }
+        if (options.PlanningMode is not null && !DeveloperPlanningModes.IsKnown(options.PlanningMode))
+        {
+            throw new ArgumentException("--planning-mode must be proposals-first or draft-first.");
+        }
+        if (options.ExistingRunId is not null && options.PlanningMode is not null)
+        {
+            throw new ArgumentException("Planning mode cannot be changed when attaching with --run.");
+        }
+        if (options.ImplementationInputs.Count > 0 && options.PlanningMode is null && options.ExistingRunId is null)
+        {
+            throw new ArgumentException("Implementation inputs require --planning-mode for a new feature or --run to resume.");
         }
         if (options.ProductRepositoryUrl is not null && !InputRules.IsRepositoryUrl(options.ProductRepositoryUrl))
         {

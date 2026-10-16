@@ -13,7 +13,8 @@ public sealed record FeatureSubmission(
     string BusinessAnalystId = "default",
     string BusinessAnalystSkillId = "requirements-analysis",
     int ReviewerCount = 3,
-    DeveloperSkillSelection[]? DeveloperSkills = null);
+    DeveloperSkillSelection[]? DeveloperSkills = null,
+    string? PlanningMode = null);
 
 /// <summary>A new human-authored revision of a skill used by one AI role and optional domain.</summary>
 public sealed record AgentSkillRevisionRequest(
@@ -602,6 +603,7 @@ public static class InputRules
     {
         error = string.Empty;
         if (submission is null || !IsText(submission.Text) ||
+            submission.PlanningMode is not null && !DeveloperPlanningModes.IsKnown(submission.PlanningMode) ||
             !IsText(submission.BusinessAnalystId, 128) ||
             !IsProductId(submission.BusinessAnalystSkillId) ||
             !IsValidReviewerCount(submission.ReviewerCount))

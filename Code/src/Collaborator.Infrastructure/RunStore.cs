@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace Collaborator.Infrastructure;
 
 /// <summary>Idempotent activity persistence and revision-bound decisions.</summary>
-public sealed class RunStore(CollaboratorDb db)
+public sealed partial class RunStore(CollaboratorDb db)
 {
     public async Task<FeatureRun> GetAsync(Guid id, CancellationToken cancellationToken) =>
         await db.Runs.SingleAsync(x => x.Id == id, cancellationToken);
@@ -747,7 +747,8 @@ public sealed class RunStore(CollaboratorDb db)
         }
         var previous = await db.PlanRevisions.AsNoTracking()
             .SingleAsync(x => x.RunId == id && x.Revision == revision - 1, cancellationToken);
-        if (previous.Decision != PlanDecisionKinds.Revise)
+        if (previous.Decision != PlanDecisionKinds.Revise &&
+            !(revision == 2 && await GetPlanningModeAsync(id, cancellationToken) == DeveloperPlanningModes.DraftFirst))
         {
             throw new InvalidOperationException("A new plan revision requires a persisted revise decision.");
         }
@@ -841,12 +842,15 @@ public sealed class RunStore(CollaboratorDb db)
         }
 
         var json = JsonSerializer.Serialize(plan, JsonSerializerOptions.Web);
+        await GetDeveloperProposalsForPlanAsync(id, revision, cancellationToken);
         run.PlanJson = json;
         run.PlanRevision = revision;
         run.Decision = null;
         run.DecisionComment = null;
         run.DecisionBy = null;
-        run.Status = "awaiting_approval";
+        var initialDraft = revision == 1 &&
+            await GetPlanningModeAsync(id, cancellationToken) == DeveloperPlanningModes.DraftFirst;
+        run.Status = initialDraft ? "initial_plan_drafted" : "awaiting_approval";
         db.PlanRevisions.Add(new PlanRevisionRecord { RunId = id, Revision = revision, PlanJson = json });
         var developers = await db.Developers.AsNoTracking()
             .OrderBy(x => x.UserId).ToListAsync(cancellationToken);
@@ -892,16 +896,19 @@ public sealed class RunStore(CollaboratorDb db)
             {
                 throw new InvalidOperationException($"Selected reviewer '{match.UserId}' is not enabled.");
             }
-            db.ReviewAssignments.Add(new ReviewAssignmentRecord
+            if (!initialDraft)
             {
-                RunId = id,
-                Revision = revision,
-                DeveloperId = developer.UserId,
-                DeveloperDisplayName = developer.DisplayName,
-                ReviewFocus = developer.ReviewFocus,
-                MatchedRolesJson = JsonSerializer.Serialize(match.MatchedRoles, JsonSerializerOptions.Web),
-                ReviewPrompt = BuildReviewPrompt(run, plan, developer, match.MatchedRoles)
-            });
+                db.ReviewAssignments.Add(new ReviewAssignmentRecord
+                {
+                    RunId = id,
+                    Revision = revision,
+                    DeveloperId = developer.UserId,
+                    DeveloperDisplayName = developer.DisplayName,
+                    ReviewFocus = developer.ReviewFocus,
+                    MatchedRolesJson = JsonSerializer.Serialize(match.MatchedRoles, JsonSerializerOptions.Web),
+                    ReviewPrompt = BuildReviewPrompt(run, plan, developer, match.MatchedRoles)
+                });
+            }
         }
         run.SelectedReviewersJson ??= JsonSerializer.Serialize(matches, JsonSerializerOptions.Web);
         AddEvent(id, "plan_generated", "planner");

@@ -1,6 +1,6 @@
 # Collaborator foundation
 
-A headless .NET 10 foundation for the [implementation plan](../IMPLEMENTATION_PLAN.md).
+A .NET 10 foundation with a Vue 3 web client for the [implementation plan](../IMPLEMENTATION_PLAN.md).
 It implements text intake, PostgreSQL persistence, a BA specification review gate,
 developer review and plan approval, Copilot-backed repository analysis and patch
 generation, and publication of a review branch to a configured Git repository.
@@ -8,6 +8,141 @@ HTTPS, SSH, and local `file://` sources are supported with a configurable base b
 It is not yet the complete repository-aware development platform: the implementer
 can run builds/tests through SDK tools, but publication does not independently
 run or require passing checks. No hosted pull request, merge, or deployment is created.
+
+## Vue web client
+
+The Vue 3 + TypeScript workspace is in `src/Collaborator.Web`. It supports:
+
+- Product registration, repository URL/base-branch changes, and paged discovery.
+- Developer profiles with human reviewer roles and enable/disable settings.
+- AI role/domain skills, prompt authoring, immutable revisions, and revision history.
+- Feature submission with analyst skill, reviewer count, and default, selected,
+  or no specialist skills.
+- Run discovery/open-by-ID, automatic 5-second refresh, complete event pagination,
+  specifications, architecture, specialist analyses, synthesis, plans, and
+  implementation branch handoffs.
+- Specification JSON editing, BA question answers, approve/revise/reject decisions,
+  and individual developer review responses. The API enforces every review gate.
+
+Use Node.js 22.12+ or Node.js 24 LTS and npm. From this `Code` directory:
+
+```powershell
+npm --prefix src\Collaborator.Web ci
+npm --prefix src\Collaborator.Web test
+npm --prefix src\Collaborator.Web run build
+```
+
+Build **before** starting/restarting, building, or publishing the API. Vite writes
+generated assets to `src/Collaborator.Api/wwwroot`, which is ignored by Git and
+included by ASP.NET Core publishing. Do not edit that generated directory.
+The .NET build does not invoke npm; headless backend development remains possible
+without Node.js. Do not run the Vite production build concurrently with a .NET
+build/publish, because it replaces hashed assets while MSBuild reads them.
+
+Start the existing Aspire stack as described below, then open the API origin,
+normally `http://localhost:5076/`. No separate frontend service is required.
+Enter the existing `Parameters:api-key` development secret in the connection
+form. The key stays in browser memory only: reload/disconnect requires reconnecting.
+Never put keys in frontend source, `.env`/`VITE_*` variables, URLs, or browser
+storage. Static assets are public; all data requests still require `X-Api-Key`.
+Disconnect clears the visible workspace, but it does not revoke the shared key.
+
+At a review gate, "Your next step" identifies the active document. Each decision
+names its document and revision, links back to that document, and explains what
+approval or revision feedback does next. Architecture decisions use only the
+matching current analysis; history stays collapsed and labeled as reference.
+Developer responses review the implementation plan, not the specialist prompt.
+They are separate from the final plan approval that authorizes code generation.
+Neither plan approval nor a published review branch means merge or deployment.
+
+### Developer implementation input
+
+New Vue submissions offer two planning approaches:
+
+- **Developer ideas first:** select the human reviewers after approved
+  architecture and specialist analysis, collect everyone's implementation ideas,
+  then generate the first combined plan.
+- **Initial AI draft first:** generate a non-approvable draft, collect developer
+  ideas against it, then generate a combined replacement plan.
+
+Each developer describes their proposed implementation, trade-offs, and tests,
+or explicitly chooses **No additional input**. The AI waits for every assigned
+developer, then receives all confirmed contributions as structured evidence.
+Conflicting suggestions become open questions rather than silently expanding the
+approved specification. Everyone still reviews the resulting plan, followed by
+a separate final plan decision before implementation.
+
+A final revision request opens a new input round with previous ideas prefilled.
+Every developer must update or reconfirm; old submissions do not automatically
+count. A round closes once everyone confirms. Inputs may be updated before that
+point; subsequent changes require another plan revision. Concurrent submissions
+may return 409; refresh and retry rather than assuming the input was saved.
+
+The optional feature-intake field `planningMode` accepts `proposals-first` or
+`draft-first`. Omission retains the legacy workflow for existing API/console
+clients. It participates in submission idempotency. The initial AI draft counts
+as plan revision 1, leaving four more revisions within the existing five-revision
+limit. Plan approval is not allowed on that initial draft.
+
+- `GET /api/v1/runs/{id}/developer-proposals` lists input rounds and participant
+  responses in revision order.
+- `POST /api/v1/runs/{id}/developer-proposals/{userId}` confirms
+  `{ "revision": 1, "proposal": "Reuse the existing export service", "noAdditionalInput": false }`.
+  Instead, use `"proposal": null, "noAdditionalInput": true` for explicit no input.
+  Text is limited to 4,000 characters. Unknown participants return 404; stale or
+  closed rounds return 409; invalid or ambiguous input returns 400.
+
+These routes require the same development API key, not separate developer
+authentication. Settings/rounds use existing workflow artifacts and the
+transactional outbox; no schema migration is needed. Refresh both API and workflow
+resources to activate the new workflow entry point. Existing runs retain their
+original orchestration. The console can collect proposals interactively or submit
+explicit scripted inputs for each revision. It never invents human proposals,
+including in automatic mode.
+
+For frontend hot reload, keep the API running and use a second terminal:
+
+```powershell
+# Optional override when the API does not use port 5076:
+$env:COLLABORATOR_API_URL = 'http://localhost:5076'
+npm --prefix src\Collaborator.Web run dev
+```
+
+Open the Vite URL printed by the command (normally `http://127.0.0.1:5173`).
+The development proxy sends `/api` requests to the API. It does not inject keys
+or require CORS. If the proxy is unavailable or a key/decision is invalid, the
+client displays the API/network error instead of reporting success.
+
+For a publish containing the site:
+
+```powershell
+npm --prefix src\Collaborator.Web run build
+dotnet publish src\Collaborator.Api\Collaborator.Api.csproj -c Release
+```
+
+The published application is still **Development-only**, not a production
+deployment with user authentication. This client exposes the existing fixed
+workflow; it is not a workflow designer. Product names/briefs cannot be updated
+after registration by the current API; only repository settings are editable.
+Prompt/configuration changes affect future runs, not captured inputs in existing
+runs. If more than 50 products exist, load additional products in the directory
+or enter a known registered product ID directly in feature intake.
+
+### Browser discovery API
+
+Both routes require the existing development key:
+
+- `GET /api/v1/products?offset=0&limit=50`: product context and repository settings,
+  ordered by product ID; does not return the cached repository catalog.
+- `GET /api/v1/runs?offset=0&limit=50`: run ID, product ID, feature text, status,
+  and creation time, ordered newest-first with ID tie-breaking; does not return
+  captured prompts, idempotency keys, or artifact payloads.
+
+Each returns `{ "items": [], "total": 0, "offset": 0, "limit": 50 }`.
+`offset` must be nonnegative and `limit` must be 1-200 (default 50); invalid
+pagination returns 400 Problem Details. Pages past the end are empty with the
+current total. Offset pages are not a transactional snapshot: refresh the
+directory to see a consistent recent view after concurrent registrations.
 
 ## Local prerequisites
 
@@ -50,6 +185,19 @@ local development storage, **not an encrypted production vault**. Git repository
 access and Copilot authentication are separate: configure host-side Git credentials
 for private sources, and sign in to Copilot as described below.
 
+To copy an existing secret without printing its value, run from `Code`:
+
+```powershell
+.\scripts\Copy-DevelopmentSecret.ps1
+# Copy a different AppHost secret:
+.\scripts\Copy-DevelopmentSecret.ps1 -Name 'Parameters:workflow-key'
+```
+
+The default is `Parameters:api-key`, ready to paste into the Vue connection form.
+The script reads the secrets ID from the AppHost project and does not change
+configuration. Clipboard history/synchronization may retain copied secrets;
+clear the clipboard when finished.
+
 ## F5 and local resources
 
 Open the **repository root (`aicoder`)** as the VS Code workspace — the launch
@@ -57,9 +205,34 @@ configurations live in [../.vscode/launch.json](../.vscode/launch.json). Install
 recommended extensions, make sure Docker is running and the one-time secrets are set,
 then in **Run and Debug** pick one of:
 
+- **`Collaborator: AppHost + Vue`** — starts the AppHost through the Aspire
+  extension and the Vue/Vite development server together, then opens Edge at
+  `http://127.0.0.1:5173/` when Vite is ready. Vue edits hot-reload; `/api`
+  requests proxy to the existing API at `http://localhost:5076`. Run
+  `npm --prefix src\Collaborator.Web ci` once before the first launch. Wait
+  until the API resource is healthy before connecting with your development
+  key. AppHost and Vue sessions stop independently; use the debug toolbar's
+  **Stop All** command to end both. The browser debug session closes when Vite
+  stops. Port 5173 must be free (the server fails explicitly
+  instead of silently choosing another port).
+  Before launch, a scoped Aspire stop task releases any previous instance of
+  this AppHost so Windows does not lock DLLs during the next build. It preserves
+  database/storage volumes and saved runs; expect a brief backend interruption.
 - `Collaborator: Aspire extension (debug all services)` — Aspire extension; breakpoints
   work in the API and Workflows projects.
 - `Collaborator: Aspire (.NET 10)` — C# Dev Kit; debugs the AppHost process.
+
+Stop any existing VS Code debug session before relaunching the compound. To keep
+an already-running backend untouched, use `Collaborator: Vue (Vite + Edge)` alone
+instead. Do not delete database/storage volumes.
+
+If the compound starts and immediately stops, check the Vue terminal for
+`Port 5173 is already in use`. Stop the previous Vite session in the terminal or
+debug session that owns it before retrying F5. Do not run a separate
+`npm run dev` alongside the compound; do not terminate unrelated Node processes.
+The compound deliberately sets `stopAll: false`: Aspire debugs the one-shot
+migrator as a child session, and that session's normal completion must not
+terminate the AppHost or Vue.
 
 Press F5; the Aspire dashboard opens in the browser. The first run pulls container
 images (PostgreSQL, Azurite, Key Vault emulator) and may prompt to trust the Key
@@ -548,6 +721,57 @@ These commands do not inherit repository arguments from the F5 launch profile.
 Configure at least the requested number of enabled developer profiles, or the
 workflow cannot select its review group. `--auto` does not invent developer
 responses; supply `--review-response` for every assigned reviewer.
+
+### Automated developer-proposal example
+
+Use `scripts\Invoke-DeveloperProposalExample.ps1` with an isolated copy of the
+dependency-free Node task-board example, not an unrelated application. It adds
+task counts through the actual API client, configures two dedicated reviewers,
+submits one implementation proposal plus an explicit no-input response, requests
+a plan revision, and submits fresh ideas from both developers before approving.
+It performs real model calls, persists demo data, and publishes a review branch;
+all proposals and approvals in this example are scripted, not human sign-off.
+
+```powershell
+.\scripts\Invoke-DeveloperProposalExample.ps1 `
+  -RepositoryUrl 'file:///H:/src/my-isolated-taskboard-remote.git' `
+  -PlanningMode proposals-first
+
+# Uses the same flow, but starts from an initial AI draft:
+.\scripts\Invoke-DeveloperProposalExample.ps1 `
+  -RepositoryUrl 'file:///H:/src/my-isolated-taskboard-remote.git' `
+  -PlanningMode draft-first
+```
+
+The client reads the key from the existing environment/user secrets without
+printing it. The example does not merge, deploy, or independently execute the
+published repository's tests. Verify the reported commit separately. Reviewer
+selection still uses configured profiles; if different reviewers are selected,
+the client stops and names missing inputs rather than filling them automatically.
+Resume that run with explicit inputs for the selected IDs instead of duplicating
+the feature.
+
+For these example profiles, the script can resume with `-RunId <guid>` and the
+original `-PlanningMode`. Add `-SkipRevisionRequest` if the coordinator's revision
+request was already accepted, so it is not requested again. Already-confirmed
+inputs are skipped; missing inputs for unexpected reviewers still require the
+underlying client's explicit flags.
+
+Both modes completed real Copilot/API runs on 2026-10-16. The proposals-first
+example reached approved plan revision 2; draft-first reached approved revision
+3 after its non-approvable initial draft. Separate checkouts passed 11 and 9
+repository tests respectively, plus 306 independent HTTP/count/nonmutation states
+and four desktop/mobile browser scenarios. See
+[the recorded run IDs and review commits](TEST_PROGRAM.md#live-automated-developer-proposal-examples).
+These demo approvals are scripted, not independent human sign-off.
+
+The underlying flags are `--planning-mode proposals-first|draft-first`,
+`--implementation-proposal 'revision|developer-id|text'`, and
+`--no-implementation-input 'revision|developer-id'`. Inputs bind to the target
+plan revision: proposals-first begins at 1; draft-first begins at 2. Repeated
+flags can supply later-round inputs, but confirmations are never reused between
+revisions. `--auto` still requires explicit review responses as well. Use `--run`
+to resume; the planning mode cannot be changed after submission.
 
 ```powershell
 # Interactive: configure three role-matched reviewers; answer each review and then decide on the plan

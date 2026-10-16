@@ -7,12 +7,13 @@ flows; dotted arrows represent configuration, coordination, or observability.
 
 ```mermaid
 flowchart TB
-    CLIENT["HTTP client / VS Code console / future UI"]
+    CLIENT["Vue 3 web client / HTTP client / VS Code console"]
     PEOPLE["Product owner, BA, architect reviewer, developers"]
     CONFIG["Versioned configuration<br/>Products, repositories, roles, skill revisions"]
 
     subgraph PLATFORM["Collaborator - .NET 10 foundation"]
         API["ASP.NET Core REST API<br/>feature intake, product and skill config,<br/>status, artifact review, audit"]
+        WEB["Generated Vue static assets<br/>served by API; Vite proxy during development"]
         OUTBOX["Transactional outbox dispatcher<br/>reliable workflow starts and API events"]
         BRIDGE["Functions HTTP bridge<br/>internal workflow start and decision events"]
 
@@ -55,6 +56,7 @@ flowchart TB
     end
 
     CLIENT -->|"submit feature / answer questions / approve / revise"| API
+    WEB -->|"same-origin browser requests with in-memory development key"| API
     PEOPLE -->|"review BA spec, architecture, and plan"| API
     CONFIG -.->|"registered product + skill state"| API
 
@@ -117,6 +119,12 @@ flowchart TB
   explicit subset, or none. With none, an empty result bundle records completion
   and synthesis is skipped. A user-defined QA skill can plan tests using that
   same path; there is no hardcoded QA behavior or test-execution/UAT gate.
+- Vue submissions can collect human implementation proposals before the first
+  AI plan or against an initial AI draft. Each selected developer confirms a
+  proposal or explicit no-input response. A frozen round and transactional
+  outbox event release AI planning only after everyone responds. Revised plans
+  require fresh confirmations. This contribution gate is separate from developer
+  plan review and final approval; legacy runs retain their original workflow.
 - The Aspire AppHost composes local development dependencies: PostgreSQL, Azurite,
   the Key Vault emulator, the API, and the Azure Functions host.
 - PostgreSQL is the authoritative application database for runs, approvals, outbox records,

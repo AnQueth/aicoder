@@ -16,7 +16,8 @@ internal sealed record RunView(
     string? FailureCode, string? RepositoryCommit, RepositoryCatalog? RepositoryCatalog, DraftPlan? Plan,
     CodeChangeStatus? CodeChange,
     string? RepositoryUrl = null,
-    string? RepositoryBaseBranch = null);
+    string? RepositoryBaseBranch = null,
+    string? PlanningMode = null);
 
 internal sealed record RunEventView(long Id, Guid RunId, string Kind, string Actor, DateTimeOffset CreatedAt);
 
@@ -112,9 +113,17 @@ internal sealed class CollaboratorApi(HttpClient http, Action<string>? trace)
     public Task<ApiResult<SubmissionView>> SubmitFeatureAsync(
         string productId, string text, string idempotencyKey, string businessAnalystId,
         string businessAnalystSkillId, int reviewerCount, CancellationToken ct,
-        DeveloperSkillSelection[]? developerSkills = null) =>
+        DeveloperSkillSelection[]? developerSkills = null, string? planningMode = null) =>
         SendAsync<SubmissionView>(HttpMethod.Post, $"/api/v1/products/{Uri.EscapeDataString(productId)}/feature-requests",
-            new FeatureSubmission(text, businessAnalystId, businessAnalystSkillId, reviewerCount, developerSkills), idempotencyKey, ct);
+            new FeatureSubmission(text, businessAnalystId, businessAnalystSkillId, reviewerCount, developerSkills, planningMode), idempotencyKey, ct);
+
+    public Task<ApiResult<DeveloperProposalRound[]>> GetDeveloperProposalsAsync(Guid runId, CancellationToken ct) =>
+        SendAsync<DeveloperProposalRound[]>(HttpMethod.Get, $"/api/v1/runs/{runId}/developer-proposals", null, null, ct);
+
+    public Task<ApiResult<JsonElement>> SubmitDeveloperProposalAsync(
+        Guid runId, string userId, DeveloperProposalSubmission proposal, CancellationToken ct) =>
+        SendAsync<JsonElement>(HttpMethod.Post,
+            $"/api/v1/runs/{runId}/developer-proposals/{Uri.EscapeDataString(userId)}", proposal, null, ct);
 
     public Task<ApiResult<RunView>> GetRunAsync(Guid runId, CancellationToken ct) =>
         SendAsync<RunView>(HttpMethod.Get, $"/api/v1/runs/{runId}", null, null, ct);

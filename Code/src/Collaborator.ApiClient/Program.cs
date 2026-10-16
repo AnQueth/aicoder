@@ -157,7 +157,7 @@ namespace Collaborator.ApiClient
                 var submitted = await api.SubmitFeatureAsync(
                     options.ProductId, feature, idempotencyKey,
                     options.BusinessAnalystId, options.BusinessAnalystSkillId, options.ReviewerCount, ct,
-                    options.DeveloperSkills?.ToArray());
+                    options.DeveloperSkills?.ToArray(), options.PlanningMode);
                 if (!submitted.IsSuccess || submitted.Body is null)
                 {
                     return Fail($"submission returned {(int)submitted.Status}: {submitted.Problem}");
@@ -534,6 +534,13 @@ namespace Collaborator.ApiClient
                     }
                     var run = result.Body;
                     await PrintNewEventsAsync(id, timeout.Token);
+                    if (run.Status == "awaiting_developer_proposals")
+                    {
+                        if (!await SubmitImplementationInputsAsync(run, timeout.Token))
+                        {
+                            return null;
+                        }
+                    }
                     if (options.Verbose)
                     {
                         Log($"  poll #{polls} status={run.Status} revision={run.PlanRevision}");
@@ -561,6 +568,62 @@ namespace Collaborator.ApiClient
             {
                 Fail($"timed out after {options.Timeout.TotalSeconds:F0}s waiting for {what}.");
                 return null;
+            }
+        }
+
+        private async Task<bool> SubmitImplementationInputsAsync(RunView run, CancellationToken ct)
+        {
+            var result = await api!.GetDeveloperProposalsAsync(run.Id, ct);
+            if (!result.IsSuccess || result.Body is null)
+            {
+                Fail($"Could not load developer proposal rounds: {(int)result.Status} {result.Problem}");
+                return false;
+            }
+            var round = result.Body.SingleOrDefault(item => item.Revision == run.PlanRevision + 1);
+            if (round is null)
+            {
+                Fail("Proposal collection has no matching revision. Refresh before contributing.");
+                return false;
+            }
+            Info($"  implementation input round for plan r{round.Revision} ({run.PlanningMode})");
+            if (run.Plan is not null)
+            {
+                PrintPlan(run);
+            }
+            var inputs = new Dictionary<(int Revision, string UserId), DeveloperProposalSubmission>(options.ImplementationInputs);
+            if (options.Interactive)
+            {
+                foreach (var developer in round.Developers.Where(item => item.SubmittedAt is null))
+                {
+                    if (inputs.ContainsKey((round.Revision, developer.UserId)))
+                    {
+                        continue;
+                    }
+                    Info($"  {developer.DisplayName} ({developer.UserId}), roles: {string.Join(", ", developer.MatchedRoles)}");
+                    Info($"  previous input (not confirmed): {developer.Proposal ?? "(none)"}");
+                    while (true)
+                    {
+                        var text = Prompt("Implementation proposal (enter /none for explicit no additional input)");
+                        var submission = new DeveloperProposalSubmission(round.Revision, text == "/none" ? null : text, text == "/none");
+                        if (DeveloperProposalRules.IsValid(submission))
+                        {
+                            inputs.Add((round.Revision, developer.UserId), submission);
+                            break;
+                        }
+                        Warn("  Provide 1-4000 characters or /none. Blank input is not a confirmation.");
+                    }
+                }
+            }
+            try
+            {
+                await DeveloperProposalClient.SubmitRoundAsync(api, run.Id, round, inputs, Info, ct);
+                return true;
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+            {
+                finalStatus = run.Status;
+                Fail(ex.Message);
+                return false;
             }
         }
 

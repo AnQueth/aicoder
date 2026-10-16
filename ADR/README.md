@@ -33,3 +33,6 @@ Current decisions:
 - [0015: Use a QA specialist in developer planning analysis](./0015-qa-specialist-during-planning.md)
 - [0016: User-defined prompts and per-run specialist selection](./0016-user-defined-per-run-specialists.md)
 - [0017: Require explicit implementation completion](./0017-explicit-implementation-completion.md)
+- [0018: Vue development dashboard on the existing API origin](./0018-vue-development-dashboard.md)
+- [0019: Make review targets and consequences explicit](./0019-explicit-review-decision-context.md)
+- [0020: Collect human implementation proposals before combined planning](./0020-human-developer-implementation-proposals.md)

@@ -37,7 +37,8 @@ public sealed class Planner(IPlanGenerator generator)
         string? reviewerFeedback, int revision, RepositoryCatalog? repositoryCatalog,
         RepositorySourceReference? repositorySource, CancellationToken cancellationToken,
         DeveloperSkillAnalysis[]? specialistAnalyses = null,
-        CollaborationSynthesis? collaborationSynthesis = null)
+        CollaborationSynthesis? collaborationSynthesis = null,
+        DeveloperProposal[]? developerProposals = null)
     {
         var input = JsonSerializer.Serialize(new
         {
@@ -50,7 +51,8 @@ public sealed class Planner(IPlanGenerator generator)
             repositoryCatalog,
             repositorySource,
             specialistAnalyses,
-            collaborationSynthesis
+            collaborationSynthesis,
+            developerProposals
         }, JsonSerializerOptions.Web);
         var plan = await generator.GenerateAsync(input, cancellationToken);
         InputRules.ValidatePlan(plan);

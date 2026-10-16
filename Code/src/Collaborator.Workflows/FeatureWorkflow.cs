@@ -29,6 +29,13 @@ public sealed class FeatureWorkflow(
 {
     [Function(nameof(BusinessAnalystFeatureWorkflow))]
     public static async Task BusinessAnalystFeatureWorkflow([OrchestrationTrigger] TaskOrchestrationContext context)
+        => await RunWorkflow(context, collectDeveloperProposals: false);
+
+    [Function(nameof(DeveloperProposalFeatureWorkflow))]
+    public static async Task DeveloperProposalFeatureWorkflow([OrchestrationTrigger] TaskOrchestrationContext context)
+        => await RunWorkflow(context, collectDeveloperProposals: true);
+
+    private static async Task RunWorkflow(TaskOrchestrationContext context, bool collectDeveloperProposals)
     {
         var id = context.GetInput<Guid>();
         try
@@ -90,8 +97,32 @@ public sealed class FeatureWorkflow(
             await context.CallActivityAsync(nameof(GenerateCollaborationSynthesis), id);
 
             var planRevision = 1;
+            if (collectDeveloperProposals)
+            {
+                var mode = await context.CallActivityAsync<string>(nameof(GetDeveloperPlanningMode), id);
+                if (mode == DeveloperPlanningModes.DraftFirst)
+                {
+                    await context.CallActivityAsync(nameof(GenerateCollaborativePlan), new PlanGenerationRequest(id, planRevision));
+                    planRevision++;
+                }
+            }
             while (true)
             {
+                if (collectDeveloperProposals)
+                {
+                    var proposalRequest = new PlanGenerationRequest(id, planRevision);
+                    await context.CallActivityAsync(nameof(PrepareDeveloperProposals), proposalRequest);
+                    context.SetCustomStatus("awaiting_developer_proposals");
+                    while (true)
+                    {
+                        var signal = await context.WaitForExternalEvent<PlanGenerationRequest>("developer-proposals-ready");
+                        if (signal.RunId == id && signal.Revision == planRevision &&
+                            await context.CallActivityAsync<bool>(nameof(AreDeveloperProposalsReady), proposalRequest))
+                        {
+                            break;
+                        }
+                    }
+                }
                 await context.CallActivityAsync(
                     nameof(GenerateCollaborativePlan),
                     new PlanGenerationRequest(id, planRevision));
@@ -382,6 +413,32 @@ public sealed class FeatureWorkflow(
         [ActivityTrigger] PlanGenerationRequest request, CancellationToken cancellationToken)
         => GeneratePlanAsync(request, cancellationToken);
 
+    [Function(nameof(GetDeveloperPlanningMode))]
+    public Task<string?> GetDeveloperPlanningMode([ActivityTrigger] Guid id, CancellationToken ct) =>
+        store.GetPlanningModeAsync(id, ct);
+
+    [Function(nameof(PrepareDeveloperProposals))]
+    public async Task PrepareDeveloperProposals([ActivityTrigger] PlanGenerationRequest request, CancellationToken ct)
+    {
+        var run = await store.GetAsync(request.RunId, ct);
+        var matches = await store.GetSelectedReviewersAsync(run.Id, ct);
+        if (matches is null)
+        {
+            var record = await store.GetFeatureSpecificationRevisionAsync(run.Id, run.FeatureSpecificationRevision, ct);
+            var specification = System.Text.Json.JsonSerializer.Deserialize<FeatureSpecification>(
+                record!.SpecificationJson, System.Text.Json.JsonSerializerOptions.Web)
+                ?? throw new InvalidDataException("The approved specification is invalid.");
+            matches = await reviewerSelector.SelectAsync(run.Text, specification,
+                await store.GetEnabledDeveloperProfilesAsync(ct), run.ReviewerCount, ct);
+        }
+        await store.PrepareProposalRoundAsync(run.Id, request.Revision, matches, ct);
+    }
+
+    [Function(nameof(AreDeveloperProposalsReady))]
+    public async Task<bool> AreDeveloperProposalsReady([ActivityTrigger] PlanGenerationRequest request, CancellationToken ct) =>
+        (await store.GetProposalRoundsAsync(request.RunId, ct))
+            .Any(x => x.Revision == request.Revision && x.Status == "ready");
+
     private async Task GeneratePlanAsync(
         PlanGenerationRequest request,
         CancellationToken cancellationToken)
@@ -432,10 +489,11 @@ public sealed class FeatureWorkflow(
             reviewerMatches = await reviewerSelector.SelectAsync(
                 run.Text, specification, developerProfiles, run.ReviewerCount, cancellationToken);
         }
+        var developerProposals = await store.GetDeveloperProposalsForPlanAsync(run.Id, request.Revision, cancellationToken);
         var plan = await planner.CreateAsync(
             run.ProductBrief, run.Text, specification, previousPlan, feedback,
             request.Revision, catalog, repositorySnapshot.Source, cancellationToken,
-            specialistAnalyses, collaborationSynthesis);
+            specialistAnalyses, collaborationSynthesis, developerProposals);
         await store.StorePlanAsync(request.RunId, request.Revision, plan, cancellationToken, reviewerMatches);
     }
 
@@ -472,7 +530,9 @@ public sealed class FeatureWorkflow(
         var existing = await client.GetInstanceAsync(instanceId, cancellation: cancellationToken);
         if (existing is null)
         {
-            await client.ScheduleNewOrchestrationInstanceAsync(nameof(BusinessAnalystFeatureWorkflow), id,
+            var mode = await store.GetPlanningModeAsync(id, cancellationToken);
+            var workflow = mode is null ? nameof(BusinessAnalystFeatureWorkflow) : nameof(DeveloperProposalFeatureWorkflow);
+            await client.ScheduleNewOrchestrationInstanceAsync(workflow, id,
                 new StartOrchestrationOptions { InstanceId = instanceId }, cancellationToken);
         }
         return new AcceptedResult();
@@ -548,6 +608,30 @@ public sealed class FeatureWorkflow(
         }
         await client.RaiseEventAsync(id.ToString("N"), "plan-decision",
             new PlanDecisionSignal(record.Revision, record.Decision), cancellationToken);
+        return new AcceptedResult();
+    }
+
+    [Function(nameof(DeveloperProposalsReady))]
+    public async Task<IActionResult> DeveloperProposalsReady(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "internal/runs/{id:guid}/proposals-ready")]
+        HttpRequest request, Guid id, [DurableClient] DurableTaskClient client, CancellationToken cancellationToken)
+    {
+        if (!IsAuthorized(request))
+        {
+            return new UnauthorizedResult();
+        }
+        var body = await request.ReadFromJsonAsync<DecisionDelivery>(cancellationToken);
+        if (body is null || body.Revision < 1)
+        {
+            return new BadRequestObjectResult(new { error = "Proposal round revision required." });
+        }
+        var rounds = await store.GetProposalRoundsAsync(id, cancellationToken);
+        if (!rounds.Any(round => round.Revision == body.Revision && round.Status == "ready"))
+        {
+            return new ConflictObjectResult(new { error = "Every developer must confirm input before planning." });
+        }
+        await client.RaiseEventAsync(id.ToString("N"), "developer-proposals-ready",
+            new PlanGenerationRequest(id, body.Revision), cancellationToken);
         return new AcceptedResult();
     }
 

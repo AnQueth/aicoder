@@ -1,13 +1,13 @@
 # Collaborator
 
-A development-only, headless .NET 10 platform that turns feature requests into
+A development-only .NET 10 platform with a Vue 3 web client that turns feature requests into
 reviewable code changes using GitHub Copilot SDK agents and a human-reviewed
 Durable Functions workflow.
 
 ## Current workflow
 
 1. Register a product with its brief, Git repository, and optional base branch.
-2. Submit a feature request through the REST API or console client.
+2. Submit a feature request through the Vue website, REST API, or console client.
 3. Review and approve the business analyst's specification.
 4. Review and approve the repository-grounded architecture assessment.
 5. Run the user-selected specialist skills and compare their findings in a
@@ -32,6 +32,21 @@ The workflow does not create hosted pull requests, merge, or deploy.
 Open this repository root in VS Code so its launch configurations are available.
 Follow the [development setup guide](Code/README.md) for prerequisites, local
 secrets, Copilot authentication, Aspire startup, and console-client usage.
+
+For the website, install Node.js 22.12+ (or 24 LTS), then build it before
+starting/restarting the API:
+
+```powershell
+Set-Location .\Code\src\Collaborator.Web
+npm ci
+npm run build
+```
+
+Open the API URL (normally `http://localhost:5076`) and enter your existing
+development API key. The client supports products/repositories, developer roles,
+versioned prompts, feature submission, workflow evidence, and review decisions.
+See the [web client setup](Code/README.md#vue-web-client) for Vite development,
+tests, and publishing.
 
 To build and run local-only automated tests from the repository root:
 

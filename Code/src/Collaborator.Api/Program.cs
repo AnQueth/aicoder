@@ -1,4 +1,5 @@
 using Collaborator.Core;
+using Collaborator.Api;
 using Collaborator.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -37,6 +38,8 @@ if (string.IsNullOrWhiteSpace(apiKey) || apiKey.Length < 32)
 
 var app = builder.Build();
 app.UseExceptionHandler();
+app.UseDefaultFiles();
+app.UseStaticFiles();
 app.MapDefaultEndpoints();
 app.Use(async (context, next) =>
 {
@@ -57,6 +60,8 @@ app.Use(async (context, next) =>
 app.MapOpenApi();
 
 var api = app.MapGroup("/api/v1");
+api.MapDirectoryEndpoints();
+api.MapDeveloperProposalEndpoints();
 api.MapGet("/developers", async (CollaboratorDb db, CancellationToken ct) =>
     Results.Ok(await db.Developers.AsNoTracking().OrderBy(x => x.UserId).ToListAsync(ct)));
 api.MapPut("/developers/{userId}", async (
@@ -243,6 +248,10 @@ api.MapPost("/products/{id}/feature-requests", async (
         x => x.ProductId == id && x.IdempotencyKey == key, ct);
     if (existing is not null)
     {
+        if (await store.GetPlanningModeAsync(existing.Id, ct) != request.PlanningMode)
+        {
+            return Results.Problem(statusCode: 409, title: "Idempotency key was already used with a different planning mode.");
+        }
         return SubmissionResult(existing, text, analystId, skillId, request.ReviewerCount, selectionJson);
     }
     var skill = await db.AgentSkills.AsNoTracking().SingleOrDefaultAsync(
@@ -312,6 +321,7 @@ api.MapPost("/products/{id}/feature-requests", async (
         BusinessAnalystApproved = false
     };
     db.Runs.Add(run);
+    store.ConfigurePlanning(run.Id, request.PlanningMode);
     db.Outbox.Add(new OutboxMessage { Id = Guid.NewGuid(), RunId = run.Id, Kind = "start" });
     store.AddEvent(run.Id, "submitted", "development-api-key");
     try
@@ -323,11 +333,15 @@ api.MapPost("/products/{id}/feature-requests", async (
         db.ChangeTracker.Clear();
         var winner = await db.Runs.AsNoTracking().SingleAsync(
             x => x.ProductId == id && x.IdempotencyKey == key, ct);
+        if (await store.GetPlanningModeAsync(winner.Id, ct) != request.PlanningMode)
+        {
+            return Results.Problem(statusCode: 409, title: "Idempotency key was already used with a different planning mode.");
+        }
         return SubmissionResult(winner, text, analystId, skillId, request.ReviewerCount, selectionJson);
     }
     return SubmissionResult(run, text, analystId, skillId, request.ReviewerCount, selectionJson);
 });
-api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, CancellationToken ct) =>
+api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, RunStore store, CancellationToken ct) =>
 {
     var run = await db.Runs.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
     if (run is null)
@@ -350,6 +364,7 @@ api.MapGet("/runs/{id:guid}", async (Guid id, CollaboratorDb db, CancellationTok
         run.Id, run.ProductId, run.Text, run.Status, run.CreatedAt,
         run.BusinessAnalystId, run.BusinessAnalystSkillId, run.BusinessAnalystSkillRevision,
         run.ReviewerCount,
+        planningMode = await store.GetPlanningModeAsync(id, ct),
         run.FeatureSpecificationRevision, run.BusinessAnalystApproved,
         architectureRevision,
         developerSkillCount = JsonSerializer.Deserialize<DeveloperSkillSnapshot[]>(
