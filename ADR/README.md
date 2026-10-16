@@ -36,3 +36,4 @@ Current decisions:
 - [0018: Vue development dashboard on the existing API origin](./0018-vue-development-dashboard.md)
 - [0019: Make review targets and consequences explicit](./0019-explicit-review-decision-context.md)
 - [0020: Collect human implementation proposals before combined planning](./0020-human-developer-implementation-proposals.md)
+- [0021: Azure Container Apps Environment as the deployment target](./0021-azure-container-apps-deployment-target.md)

@@ -146,6 +146,9 @@ directory to see a consistent recent view after concurrent registrations.
 
 ## Local prerequisites
 
+New to the project? Start with the
+[plain-language local setup and running guide](../LOCAL_DEVELOPMENT.md).
+
 - .NET SDK 10.0.401 (pinned in `global.json`).
 - Docker-compatible container runtime running.
 - Azure Functions Core Tools v4 with .NET 10 isolated-worker support.

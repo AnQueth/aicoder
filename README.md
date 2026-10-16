@@ -30,6 +30,8 @@ The workflow does not create hosted pull requests, merge, or deploy.
 ## Getting started
 
 Open this repository root in VS Code so its launch configurations are available.
+For a plain-language walkthrough, start with
+[Local development: setup and running](LOCAL_DEVELOPMENT.md).
 Follow the [development setup guide](Code/README.md) for prerequisites, local
 secrets, Copilot authentication, Aspire startup, and console-client usage.
 
@@ -66,12 +68,14 @@ tests or the API smoke script.
 
 | Document | Purpose |
 |---|---|
+| [Local setup, in plain language](LOCAL_DEVELOPMENT.md) | First-time environment setup, daily startup, API keys, safe shutdown, and troubleshooting |
 | [Development guide](Code/README.md) | Setup, configuration, REST contracts, workflow behavior, limits, and dated verification |
 | [Workflow examples](Code/WORKFLOW_EXAMPLE.md) | Interactive feature reviews, scripted decisions, and locating generated code |
 | [Test guide](Code/TEST_PROGRAM.md) | Local tests, live Copilot tests, and API smoke verification |
 | [Component diagram](COMPONENT_DIAGRAM.md) | Current components, data flow, and execution boundaries |
 | [Product specification](SPECIFICATION.md) | Target product requirements and the current implementation boundary |
 | [Implementation plan](IMPLEMENTATION_PLAN.md) | Delivery direction, implemented checkpoint, and remaining work |
+| [Production readiness TODO](PRODUCTION_READINESS_TODO.md) | Prioritized production blockers, pilot requirements, and release acceptance criteria |
 | [Architecture decisions](ADR/README.md) | Recorded decisions and their rationale |
 | [Solution](Code/Collaborator.slnx) | Application and test projects |
 
